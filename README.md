@@ -1,5 +1,6 @@
 
-# HStack
+# HStack : First step toward symbiosis
+
 
 **The auto-kanban for normal people who want to think about less things.**
 
@@ -7,6 +8,7 @@ HStack is an AI-native task management system powered by Google Gemini. You talk
 
 No forms. No dropdowns. Just tell it what's going on.
 
+![alt text](image.png)
 ---
 
 ## Core Concept
