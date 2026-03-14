@@ -10,6 +10,7 @@ class TicketType(str, Enum):
     TASK = "TASK"
     COMMUTE = "COMMUTE"
     AGENT_TASK = "AGENT_TASK"
+    COUNTDOWN = "COUNTDOWN"
 
 class TaskBase(BaseModel):
     userid: Optional[int] = None

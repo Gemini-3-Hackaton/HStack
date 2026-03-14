@@ -229,6 +229,13 @@ async def chat_with_gemini(req: ChatRequest):
     - This creates a timed ticket with a countdown. It auto-deletes when the timer expires.
     - Default timer is 10 minutes. User can specify a different duration.
 
+    PERSONAL COUNTDOWNS:
+    - When the user says they need to do something within a certain time, call `create_countdown`.
+    - Trigger phrases: "I need to ... in N minutes", "I have to ... in N min", "I should ... in 1 hour", etc.
+    - Extract the action as the title and the duration in minutes.
+    - This creates a COUNTDOWN ticket with a live timer. It auto-deletes when the timer expires.
+    - IMPORTANT: This is different from a regular TASK. Use `create_countdown` when there is a specific time constraint ("in 30 min", "in 1 hour").
+
     MULTI-ACTION DECOMPOSITION (V7):
     - You are empowered to call MULTIPLE tools in a single turn if a user request is complex.
     - BREAK DOWN requests into discrete logical steps. 
@@ -344,9 +351,12 @@ async def chat_with_gemini(req: ChatRequest):
                         raw = await ai_tools.call_directions_service(origin, destination)
                         parsed = ai_tools.parse_transit_directions(raw)
                         if parsed:
-                            from datetime import datetime as dt
+                            from datetime import datetime as dt, timedelta, timezone
+                            now = dt.now()
+                            deadline_dt = now + timedelta(minutes=minutes)
+                            deadline_str = deadline_dt.strftime("%H:%M")
                             msg = commute_scheduler._format_commute_alert(
-                                f"🚨 Trip to {destination[:40]}", parsed, "", dt.now()
+                                f"🚨 Trip to {destination[:40]}", parsed, deadline_str, now
                             )
                             directions_text = f"⏳ {minutes} min until deadline\n{msg}\n\n📡 Live tracking started – updates every 5 min."
                         else:
@@ -382,6 +392,33 @@ async def chat_with_gemini(req: ChatRequest):
                                 pass
                         asyncio.create_task(_auto_delete(task_id, duration * 60))
                     actions_taken.append("create_agent_task")
+
+                elif call.name == "create_countdown":
+                    title = call.args.get("title", "Countdown")
+                    duration = int(call.args.get("duration_minutes", 30))
+                    from datetime import datetime, timedelta, timezone
+                    expires_at = datetime.now(timezone.utc) + timedelta(minutes=duration)
+                    payload = json.dumps({
+                        "title": title,
+                        "countdown": True,
+                        "duration_minutes": duration,
+                        "expires_at": expires_at.isoformat()
+                    })
+                    created = await database.create_task(
+                        userid=req.userid,
+                        type="COUNTDOWN",
+                        payload=payload
+                    )
+                    if created:
+                        task_id = created["id"]
+                        async def _auto_delete_cd(tid, delay):
+                            await asyncio.sleep(delay)
+                            try:
+                                await database.delete_task(tid)
+                            except Exception:
+                                pass
+                        asyncio.create_task(_auto_delete_cd(task_id, duration * 60))
+                    actions_taken.append("create_countdown")
 
             # Try to get text confirmation, fallback if not available
             confirmation_text = None

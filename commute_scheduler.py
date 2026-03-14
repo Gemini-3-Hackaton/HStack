@@ -93,6 +93,24 @@ def _day_matches(days_csv: str, now: datetime) -> bool:
     return today in day_names
 
 
+_VEHICLE_ICON = {
+    "BUS": "🚌",
+    "SUBWAY": "🚇",
+    "METRO_RAIL": "🚇",
+    "RAIL": "🚆",
+    "TRAM": "🚊",
+    "COMMUTER_TRAIN": "🚆",
+    "HIGH_SPEED_TRAIN": "🚄",
+    "HEAVY_RAIL": "🚆",
+    "LONG_DISTANCE_TRAIN": "🚆",
+    "FERRY": "⛴️",
+    "CABLE_CAR": "🚡",
+    "FUNICULAR": "🚞",
+    "SHARE_TAXI": "🚐",
+    "TROLLEYBUS": "🚎",
+}
+
+
 def _format_commute_alert(label: str, routes: list[dict], deadline_str: str, now: datetime) -> str:
     """Build a human-readable alert message from parsed routes."""
     if not routes:
@@ -100,48 +118,81 @@ def _format_commute_alert(label: str, routes: list[dict], deadline_str: str, now
 
     fastest = routes[0]  # already sorted by duration
 
-    # Find the first transit step (bus/metro/train departure)
-    first_transit = None
-    for step in fastest.get("steps", []):
-        if step.get("travel_mode") == "TRANSIT":
-            first_transit = step
-            break
+    # Detect if the route has any transit steps
+    transit_steps = [s for s in fastest.get("steps", []) if s.get("travel_mode") == "TRANSIT"]
+    walk_only = len(transit_steps) == 0
 
     lines = []
-    lines.append(f"🚇 {label.replace('_', ' ').title()} – {now.strftime('%H:%M')}")
-    lines.append(f"Fastest route: {fastest['total_duration']}")
+    lines.append(f"📍 {label.replace('_', ' ').title()}")
 
-    # Build transit chain summary
-    transit_chain = []
-    for step in fastest.get("steps", []):
-        if step.get("travel_mode") == "TRANSIT":
-            name = step.get("transit_line", "")
-            vtype = step.get("vehicle_type", "")
-            transit_chain.append(f"{name} ({vtype})" if vtype else name)
-    if transit_chain:
-        lines.append(f"Route: {' → '.join(transit_chain)}")
+    # Duration header — only show dep/arr times when transit is involved
+    dep = fastest.get('departure_time', '')
+    arr = fastest.get('arrival_time', '')
+    if dep and arr:
+        lines.append(f"⏱ Total: {fastest['total_duration']}  (dep {dep} → arr {arr})")
+    else:
+        lines.append(f"⏱ Total: {fastest['total_duration']}")
+    lines.append("")
 
-    if first_transit:
-        dep_time_str = first_transit.get("departure_time", "")
-        dep_ts = first_transit.get("departure_timestamp")
-        dep_stop = first_transit.get("departure_stop", "")
-        if dep_time_str:
-            lines.append(f"First departure: {first_transit.get('transit_line', '')} at {dep_time_str} from {dep_stop}")
-        if dep_ts:
-            minutes_left = max(0, int((dep_ts - now.timestamp()) / 60))
-            if minutes_left <= 1:
-                lines.append("⚠️  Departing NOW – hurry!")
-            else:
-                lines.append(f"⏱  {minutes_left} min until departure")
+    if walk_only:
+        # Pure walking route
+        lines.append(f"🚶 Walk the whole way – {fastest['total_duration']}")
+        lines.append("No public transit needed for this distance.")
+    else:
+        # Build step-by-step itinerary
+        for step in fastest.get("steps", []):
+            mode = step.get("travel_mode", "")
+            if mode == "WALKING":
+                lines.append(f"🚶 Walk {step.get('duration', '')}")
+            elif mode == "TRANSIT":
+                vtype = step.get("vehicle_type", "")
+                icon = _VEHICLE_ICON.get(vtype, "🚍")
+                line_name = step.get("transit_line", "?")
+                dep_stop = step.get("departure_stop", "")
+                arr_stop = step.get("arrival_stop", "")
+                dep_time = step.get("departure_time", "")
+                arr_time = step.get("arrival_time", "")
+                num_stops = step.get("num_stops", 0)
+
+                time_range = f"  {dep_time} → {arr_time}" if dep_time and arr_time else ""
+                lines.append(f"{icon} {line_name}{time_range}  ({step.get('duration', '')})")
+                if dep_stop:
+                    lines.append(f"     Board at {dep_stop}")
+                if arr_stop:
+                    stop_label = f"{num_stops} stop{'s' if num_stops != 1 else ''}" if num_stops else ""
+                    lines.append(f"     Exit at {arr_stop}" + (f"  ({stop_label})" if stop_label else ""))
+                lines.append("")
 
     # Time until deadline
-    try:
-        h, m = map(int, deadline_str.split(":"))
-        deadline_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        mins_to_deadline = max(0, int((deadline_dt - now).total_seconds() / 60))
-        lines.append(f"🎯 {mins_to_deadline} min left before your {deadline_str} deadline")
-    except Exception:
-        pass
+    if deadline_str:
+        try:
+            h, m = map(int, deadline_str.split(":"))
+            deadline_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            mins_to_deadline = max(0, int((deadline_dt - now).total_seconds() / 60))
+            if mins_to_deadline <= 5:
+                lines.append(f"🔴 {mins_to_deadline} min left before your {deadline_str} deadline!")
+            else:
+                lines.append(f"🎯 {mins_to_deadline} min left before your {deadline_str} deadline")
+        except Exception:
+            pass
+
+    # Show alternative routes summary if available
+    if len(routes) > 1:
+        alts = []
+        for r in routes[1:3]:
+            alt_transit = []
+            for s in r.get("steps", []):
+                if s.get("travel_mode") == "TRANSIT":
+                    vt = s.get("vehicle_type", "")
+                    ic = _VEHICLE_ICON.get(vt, "🚍")
+                    alt_transit.append(f"{ic}{s.get('transit_line', '?')}")
+            chain = " → ".join(alt_transit) if alt_transit else "🚶 Walk"
+            dep_t = r.get('departure_time', '')
+            dep_info = f", dep {dep_t}" if dep_t else ""
+            alts.append(f"  {chain}  ({r['total_duration']}{dep_info})")
+        lines.append("")
+        lines.append("Other options:")
+        lines.extend(alts)
 
     return "\n".join(lines)
 

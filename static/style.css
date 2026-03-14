@@ -599,6 +599,39 @@ body {
     border-left: 3px solid #FBBF24;
 }
 
+.type-badge.countdown {
+    background: rgba(56, 189, 248, 0.15);
+    color: #38BDF8;
+}
+
+.countdown-card {
+    border-left: 3px solid #38BDF8;
+}
+
+.countdown-timer {
+    display: inline-block;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    color: #38BDF8;
+    background: rgba(56, 189, 248, 0.1);
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    animation: countdownPulse 1s ease-in-out infinite;
+}
+
+.countdown-timer.expired {
+    color: #34D399;
+    background: rgba(52, 211, 153, 0.1);
+    animation: none;
+}
+
+@keyframes countdownPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
 .agent-timer {
     display: inline-block;
     font-family: 'SF Mono', 'Fira Code', monospace;
