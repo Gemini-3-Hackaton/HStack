@@ -162,14 +162,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const title = payload.title || 'Untitled';
         const type = task.type || 'TASK';
         const isAgentTask = type === 'AGENT_TASK';
+        const isCountdown = type === 'COUNTDOWN';
+        const hasTimer = (isAgentTask || isCountdown) && payload.expires_at;
 
         const card = document.createElement('div');
-        card.className = `ticket-card ${isCompleted ? 'completed' : ''}${isAgentTask ? ' agent-task-card' : ''}`;
+        card.className = `ticket-card ${isCompleted ? 'completed' : ''}${isAgentTask ? ' agent-task-card' : ''}${isCountdown ? ' countdown-card' : ''}`;
         card.dataset.id = task.id;
 
         let timerHtml = '';
-        if (isAgentTask && payload.expires_at) {
-            timerHtml = `<span class="agent-timer" data-expires="${payload.expires_at}"></span>`;
+        if (hasTimer) {
+            const timerClass = isCountdown ? 'countdown-timer' : 'agent-timer';
+            timerHtml = `<span class="${timerClass}" data-expires="${payload.expires_at}"></span>`;
         }
 
         card.innerHTML = `
@@ -185,9 +188,9 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
         `;
 
-        // Start countdown timer for agent tasks
-        if (isAgentTask && payload.expires_at) {
-            const timerEl = card.querySelector('.agent-timer');
+        // Start countdown timer for agent tasks and countdowns
+        if (hasTimer) {
+            const timerEl = card.querySelector('.agent-timer, .countdown-timer');
             const expiresAt = new Date(payload.expires_at).getTime();
 
             const updateTimer = () => {

@@ -282,6 +282,32 @@ This creates a AGENT_TASK ticket with a 10-minute countdown timer. The ticket au
     }
 }
 
+create_countdown_function_schema = {
+    "name": "create_countdown",
+    "description": """Create a personal countdown timer. Use this when the user says they need to do something within a certain time.
+Examples:
+- 'I need to eat in 30 minutes'
+- 'I have to leave in 15 min'
+- 'Remind me to call mum in 1 hour'
+- 'I should start cooking in 20 minutes'
+- 'I have a meeting in 45 min'
+This creates a COUNTDOWN ticket with a live timer that auto-deletes when it expires.""",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "title": {
+                "type": "STRING",
+                "description": "A short description of what the user needs to do, e.g. 'Time to eat'"
+            },
+            "duration_minutes": {
+                "type": "INTEGER",
+                "description": "Number of minutes until the deadline. Extract from phrases like 'in 30 min', 'in 1 hour' (=60), etc."
+            }
+        },
+        "required": ["title", "duration_minutes"]
+    }
+}
+
 # The single combined tool definition for GenAI
 chat_tools = [
      {"function_declarations": [
@@ -294,5 +320,6 @@ chat_tools = [
          remove_commute_function_schema,
          start_live_directions_function_schema,
          create_agent_task_function_schema,
+         create_countdown_function_schema,
      ]}
 ]
