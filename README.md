@@ -3,7 +3,7 @@
 The auto-kanban for normal people that want to have to think about less things.
 
 ## Starting the Server
-
+![alt text](image.png)
 This project uses `uv` for lightning-fast Python dependency management and runs a FastAPI backend with a vanilla HTML/JS/CSS frontend.
 
 To run the application locally:
