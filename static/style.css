@@ -11,6 +11,7 @@
     --type-habit: #10B981;
     --type-event: #F59E0B;
     --type-task: #3B82F6;
+    --type-commute: #A78BFA;
     
     --font-inter: 'Inter', sans-serif;
 }
@@ -495,3 +496,129 @@ body {
     transform: translateX(-50%) translateY(0);
 }
 
+/* ── Commute Alert Banner ──────────────────────────────── */
+.commute-alerts-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.commute-alert {
+    background: linear-gradient(135deg, rgba(167, 139, 250, 0.12), rgba(94, 106, 210, 0.08));
+    border: 1px solid rgba(167, 139, 250, 0.25);
+    border-radius: 12px;
+    padding: 14px 18px;
+    animation: alertSlideIn 0.4s ease-out;
+    position: relative;
+    overflow: hidden;
+}
+
+.commute-alert::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 3px;
+    height: 100%;
+    background: var(--type-commute);
+    border-radius: 3px 0 0 3px;
+}
+
+.commute-alert-message {
+    font-size: 13px;
+    color: var(--text-primary);
+    line-height: 1.6;
+    white-space: pre-line;
+    font-family: var(--font-inter);
+}
+
+.commute-alert-dismiss {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 16px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: color 0.2s;
+}
+
+.commute-alert-dismiss:hover {
+    color: var(--text-primary);
+}
+
+@keyframes alertSlideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Commute type badge color */
+.type-badge.commute {
+    background-color: rgba(167, 139, 250, 0.15);
+    color: var(--type-commute);
+}
+
+/* ── Live Trip (urgent) alert ────────────────────────── */
+.commute-alert--live {
+    background: linear-gradient(135deg, rgba(239, 68, 68, 0.12), rgba(249, 115, 22, 0.08));
+    border-color: rgba(239, 68, 68, 0.3);
+}
+
+.commute-alert--live::before {
+    background: #EF4444;
+}
+
+.live-badge {
+    display: inline-block;
+    background: #EF4444;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 6px;
+    animation: livePulse 2s ease-in-out infinite;
+}
+
+@keyframes livePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+/* Agent Task styles */
+.type-badge.agent_task {
+    background: rgba(251, 191, 36, 0.15);
+    color: #FBBF24;
+}
+
+.agent-task-card {
+    border-left: 3px solid #FBBF24;
+}
+
+.agent-timer {
+    display: inline-block;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    color: #FBBF24;
+    background: rgba(251, 191, 36, 0.1);
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    animation: timerPulse 1s ease-in-out infinite;
+}
+
+.agent-timer.expired {
+    color: #34D399;
+    background: rgba(52, 211, 153, 0.1);
+    animation: none;
+}
+
+@keyframes timerPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
