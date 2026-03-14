@@ -3,6 +3,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import json
+import asyncio
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 import database
@@ -10,6 +11,7 @@ from models import TaskCreate, UserCreate, UserLogin
 import os
 import ai_tools
 import bcrypt
+import commute_scheduler
 
 load_dotenv(override=True)
 
@@ -35,7 +37,14 @@ async def lifespan(app: FastAPI):
         print("Database connected successfully!")
     except Exception as e:
         print(f"Database connection failed (mock mode active): {e}")
+    # Start the commute scheduler as a background task
+    scheduler_task = asyncio.create_task(commute_scheduler.run_scheduler())
     yield
+    scheduler_task.cancel()
+    try:
+        await scheduler_task
+    except asyncio.CancelledError:
+        pass
     try:
         await database.close_db()
     except:
@@ -120,6 +129,43 @@ class ChatRequest(BaseModel):
     message: str
     userid: int
 
+
+# ── Commute alerts endpoint ──────────────────────────────────────────
+@app.get("/api/commute-alerts/{userid}")
+async def get_commute_alerts(userid: int):
+    """Poll this endpoint to get pending commute direction alerts for a user."""
+    alerts = commute_scheduler.get_alerts(userid)
+    return {"alerts": alerts}
+
+
+@app.get("/api/commutes/{userid}")
+async def get_user_commutes(userid: int):
+    """List all registered commutes for a user."""
+    if database.pool is None:
+        raise HTTPException(status_code=500, detail="Database not connected")
+    async with database.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM public.task WHERE userid = $1 AND type = 'COMMUTE' ORDER BY created_at ASC",
+            userid,
+        )
+    commutes = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("payload"), str):
+            try:
+                d["payload"] = json.loads(d["payload"])
+            except:
+                pass
+        commutes.append(d)
+    return commutes
+
+
+@app.get("/api/live-trips/{userid}")
+async def get_live_trips(userid: int):
+    """List active live/urgent direction trips for a user."""
+    return {"trips": commute_scheduler.get_active_live_trips(userid)}
+
+
 @app.post("/api/chat")
 async def chat_with_gemini(req: ChatRequest):
     if not ai_tools.client:
@@ -149,7 +195,7 @@ async def chat_with_gemini(req: ChatRequest):
                 "tools": ai_tools.chat_tools,
                 "system_instruction": f"""You are a ticket management assistant for HStack.
     You manage a 'stack' of tickets for the user. 
-    You MUST ONLY use the provided tools to create, delete, edit, or clear tickets.
+    You MUST ONLY use the provided tools to create, delete, edit, clear tickets, manage commutes, or get directions.
 
     CURRENT TICKET STACK (JSON):
     {context_str}
@@ -158,6 +204,30 @@ async def chat_with_gemini(req: ChatRequest):
     - HABIT: Things that happen every day or routines (e.g., 'exercise', 'brush teeth', 'morning coffee').
     - TASK: Things that need to be done once, one-off actions (e.g., 'buy groceries').
     - EVENT: Meetings or time-specific appointments (e.g., 'dentist at 3pm').
+
+    COMMUTE MANAGEMENT:
+    - When the user describes a recurring trip (e.g., "I go from X to Y every morning at 9:30"), call `add_commute`.
+    - Extract origin, destination, the arrival deadline in HH:MM format, a short label, and which days.
+    - If no days are specified, default to weekdays (monday through friday).
+    - The system will automatically send transit alerts 30 minutes before the deadline, every 5 minutes.
+    - Existing commutes appear in the ticket stack above with type "COMMUTE".
+    - To remove a commute, use `remove_commute` with the task_id.
+
+    LIVE / URGENT DIRECTIONS:
+    - When the user says "I need to get to X in N minutes" or "I'm at X, I need to be at Y by HH:MM", call `start_live_directions`.
+    - This is for ONE-TIME urgent trips, NOT recurring commutes.
+    - It will immediately show directions AND keep updating every 5 minutes until the deadline.
+    - Calculate minutes_until_deadline from the user's phrasing (e.g. "in 30 mins" = 30, "by 17:00" = minutes from now to 17:00).
+
+    DIRECTIONS:
+    - When the user asks "how do I get from A to B?" or wants live directions NOW without a deadline, call `get_directions`.
+    - This returns real-time transit routes (one-shot, no periodic updates).
+
+    AGENT TASKS (background timers):
+    - When the user mentions an AI agent, IDE, or tool working on something in the background, call `create_agent_task`.
+    - Examples: "VSCode is working on...", "Cursor is fixing...", "Copilot is generating...", "The AI is analyzing..."
+    - This creates a timed ticket with a countdown. It auto-deletes when the timer expires.
+    - Default timer is 10 minutes. User can specify a different duration.
 
     MULTI-ACTION DECOMPOSITION (V7):
     - You are empowered to call MULTIPLE tools in a single turn if a user request is complex.
@@ -180,6 +250,7 @@ async def chat_with_gemini(req: ChatRequest):
         
         func_calls = getattr(response, 'function_calls', [])
         actions_taken = []
+        directions_text = None
         if func_calls:
             for call in func_calls:
                 if call.name == "create_ticket":
@@ -198,6 +269,7 @@ async def chat_with_gemini(req: ChatRequest):
 
                 elif call.name == "delete_all_tickets":
                     await database.delete_all_tasks(req.userid)
+                    commute_scheduler.clear_user(req.userid)
                     actions_taken.append("clear")
 
                 elif call.name == "edit_ticket":
@@ -212,6 +284,105 @@ async def chat_with_gemini(req: ChatRequest):
                     await database.update_task(tid, new_type, update_payload)
                     actions_taken.append("edit")
 
+                elif call.name == "add_commute":
+                    label = call.args.get("label", "commute")
+                    origin = call.args.get("origin", "")
+                    destination = call.args.get("destination", "")
+                    deadline = call.args.get("deadline", "09:00")
+                    days = call.args.get("days", "monday,tuesday,wednesday,thursday,friday")
+
+                    commute_payload = json.dumps({
+                        "title": f"🚇 {label.replace('_', ' ').title()}: {origin[:30]}… → {destination[:30]}… @ {deadline}",
+                        "label": label,
+                        "origin": origin,
+                        "destination": destination,
+                        "deadline": deadline,
+                        "days": days,
+                        "completed": False,
+                    })
+                    await database.create_task(req.userid, "COMMUTE", commute_payload)
+                    actions_taken.append("add_commute")
+
+                elif call.name == "get_directions":
+                    origin = call.args.get("origin", "")
+                    destination = call.args.get("destination", "")
+                    try:
+                        raw = await ai_tools.call_directions_service(origin, destination)
+                        parsed = ai_tools.parse_transit_directions(raw)
+                        if parsed:
+                            from datetime import datetime as dt
+                            msg = commute_scheduler._format_commute_alert(
+                                "Directions", parsed, "", dt.now()
+                            )
+                            directions_text = msg
+                        else:
+                            directions_text = "No transit routes found for that journey."
+                    except Exception as exc:
+                        directions_text = f"Could not fetch directions: {exc}"
+                    actions_taken.append("get_directions")
+
+                elif call.name == "remove_commute":
+                    record_id = call.args.get("task_id", "")
+                    try:
+                        await database.delete_task(record_id)
+                        actions_taken.append("remove_commute")
+                    except:
+                        pass
+
+                elif call.name == "start_live_directions":
+                    origin = call.args.get("origin", "")
+                    destination = call.args.get("destination", "")
+                    minutes = int(call.args.get("minutes_until_deadline", 30))
+
+                    # Register the live trip for periodic updates
+                    trip_id = commute_scheduler.register_live_trip(
+                        req.userid, origin, destination, minutes
+                    )
+
+                    # Also fetch directions immediately so the user gets instant feedback
+                    try:
+                        raw = await ai_tools.call_directions_service(origin, destination)
+                        parsed = ai_tools.parse_transit_directions(raw)
+                        if parsed:
+                            from datetime import datetime as dt
+                            msg = commute_scheduler._format_commute_alert(
+                                f"🚨 Trip to {destination[:40]}", parsed, "", dt.now()
+                            )
+                            directions_text = f"⏳ {minutes} min until deadline\n{msg}\n\n📡 Live tracking started – updates every 5 min."
+                        else:
+                            directions_text = f"No transit routes found. Live tracking started – will retry every 5 min for {minutes} min."
+                    except Exception as exc:
+                        directions_text = f"Could not fetch initial directions: {exc}\n📡 Live tracking started – will retry every 5 min."
+                    actions_taken.append("start_live_directions")
+
+                elif call.name == "create_agent_task":
+                    title = call.args.get("title", "Agent task")
+                    duration = int(call.args.get("duration_minutes", 10))
+                    from datetime import datetime, timedelta, timezone
+                    expires_at = datetime.now(timezone.utc) + timedelta(minutes=duration)
+                    payload = json.dumps({
+                        "title": title,
+                        "agent_task": True,
+                        "duration_minutes": duration,
+                        "expires_at": expires_at.isoformat()
+                    })
+                    created = await database.create_task(
+                        userid=req.userid,
+                        type="AGENT_TASK",
+                        payload=payload
+                    )
+                    if created:
+                        task_id = created["id"]
+                        # Schedule auto-deletion when the timer expires
+                        async def _auto_delete(tid, delay):
+                            await asyncio.sleep(delay)
+                            try:
+                                await database.delete_task(tid)
+                            except Exception:
+                                pass
+                        asyncio.create_task(_auto_delete(task_id, duration * 60))
+                    actions_taken.append("create_agent_task")
+
             # Try to get text confirmation, fallback if not available
             confirmation_text = None
             try:
@@ -221,6 +392,10 @@ async def chat_with_gemini(req: ChatRequest):
             
             if not confirmation_text:
                 confirmation_text = "Action completed."
+
+            # If get_directions or start_live_directions was called, append the transit info
+            if ("get_directions" in actions_taken or "start_live_directions" in actions_taken) and directions_text:
+                confirmation_text = directions_text + "\n\n" + (confirmation_text or "")
 
             return {
                 "action": "multi" if len(actions_taken) > 1 else (actions_taken[0] if actions_taken else None),

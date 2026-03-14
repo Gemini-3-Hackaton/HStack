@@ -23,14 +23,78 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentUser = JSON.parse(localStorage.getItem('hstack_user'));
     let isLoginMode = true;
 
+    // ── Commute Alert Polling (defined early so checkAuthStatus can reference) ──
+    const commuteAlertsContainer = document.getElementById('commute-alerts');
+    let commutePollingInterval = null;
+
+    const showCommuteAlert = (alert) => {
+        const isLiveTrip = alert.type === 'live_trip' || alert.type === 'live_trip_expired';
+        const isExpired = alert.type === 'live_trip_expired';
+
+        // Only one notification at a time – clear all previous alerts
+        commuteAlertsContainer.innerHTML = '';
+
+        const el = document.createElement('div');
+        el.className = `commute-alert${isLiveTrip ? ' commute-alert--live' : ''}`;
+
+        el.innerHTML = `
+            <button class="commute-alert-dismiss" title="Dismiss">✕</button>
+            ${isLiveTrip && !isExpired ? '<div class="live-badge">LIVE</div>' : ''}
+            <div class="commute-alert-message">${alert.message}</div>
+        `;
+        el.querySelector('.commute-alert-dismiss').addEventListener('click', () => {
+            el.style.opacity = '0';
+            el.style.transform = 'translateY(-8px)';
+            setTimeout(() => el.remove(), 300);
+        });
+        commuteAlertsContainer.prepend(el);
+
+        // Only auto-dismiss expired alerts (after 2 min). Active alerts persist until the next update.
+        if (isExpired) {
+            setTimeout(() => {
+                if (el.parentNode) {
+                    el.style.opacity = '0';
+                    setTimeout(() => el.remove(), 300);
+                }
+            }, 2 * 60 * 1000);
+        }
+    };
+
+    const pollCommuteAlerts = async () => {
+        if (!currentUser) return;
+        try {
+            const resp = await fetch(`/api/commute-alerts/${currentUser.id}`);
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (data.alerts && data.alerts.length > 0) {
+                data.alerts.forEach(a => showCommuteAlert(a));
+            }
+        } catch (e) { /* silent */ }
+    };
+
+    const startCommutePolling = () => {
+        if (commutePollingInterval) clearInterval(commutePollingInterval);
+        pollCommuteAlerts();
+        commutePollingInterval = setInterval(pollCommuteAlerts, 30 * 1000);
+    };
+
+    const stopCommutePolling = () => {
+        if (commutePollingInterval) {
+            clearInterval(commutePollingInterval);
+            commutePollingInterval = null;
+        }
+    };
+
     // --- Authentication Logic ---
     const checkAuthStatus = () => {
         if (currentUser) {
             authOverlay.classList.add('hidden');
             userHeader.textContent = `Hi ${currentUser.first_name},`;
             loadTasks();
+            startCommutePolling();
         } else {
             authOverlay.classList.remove('hidden');
+            stopCommutePolling();
         }
     };
 
@@ -97,22 +161,56 @@ document.addEventListener('DOMContentLoaded', () => {
         const isCompleted = payload.completed === true;
         const title = payload.title || 'Untitled';
         const type = task.type || 'TASK';
+        const isAgentTask = type === 'AGENT_TASK';
 
         const card = document.createElement('div');
-        card.className = `ticket-card ${isCompleted ? 'completed' : ''}`;
+        card.className = `ticket-card ${isCompleted ? 'completed' : ''}${isAgentTask ? ' agent-task-card' : ''}`;
         card.dataset.id = task.id;
+
+        let timerHtml = '';
+        if (isAgentTask && payload.expires_at) {
+            timerHtml = `<span class="agent-timer" data-expires="${payload.expires_at}"></span>`;
+        }
 
         card.innerHTML = `
             <div class="ticket-status"></div>
             <div class="ticket-content">
                 <div class="ticket-title">${title}</div>
                 <div class="ticket-meta">
-                    <span class="type-badge ${type.toLowerCase()}">${type}</span>
+                    <span class="type-badge ${type.toLowerCase()}">${type.replace('_', ' ')}</span>
+                    ${timerHtml}
                     <span class="ticket-date">${formatDate(task.created_at)}</span>
                     <span style="display:none;" class="ticket-id-hidden">${task.id}</span>
                 </div>
             </div>
         `;
+
+        // Start countdown timer for agent tasks
+        if (isAgentTask && payload.expires_at) {
+            const timerEl = card.querySelector('.agent-timer');
+            const expiresAt = new Date(payload.expires_at).getTime();
+
+            const updateTimer = () => {
+                const remaining = expiresAt - Date.now();
+                if (remaining <= 0) {
+                    timerEl.textContent = 'DONE';
+                    timerEl.classList.add('expired');
+                    card.classList.add('completed');
+                    // Remove from DOM after a short delay
+                    setTimeout(() => card.remove(), 3000);
+                    return;
+                }
+                const mins = Math.floor(remaining / 60000);
+                const secs = Math.floor((remaining % 60000) / 1000);
+                timerEl.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+            };
+
+            updateTimer();
+            const interval = setInterval(() => {
+                if (!document.body.contains(card)) { clearInterval(interval); return; }
+                updateTimer();
+            }, 1000);
+        }
 
         const statusIcon = card.querySelector('.ticket-status');
         statusIcon.addEventListener('click', async (e) => {
@@ -278,8 +376,22 @@ document.addEventListener('DOMContentLoaded', () => {
             if (response.ok) {
                 await loadTasks();
                 
-                // Always show the AI's confirmation text if it exists
-                if (data.response) {
+                // On clear/reset, remove all alert banners too
+                if (data.action === 'clear') {
+                    commuteAlertsContainer.innerHTML = '';
+                }
+
+                // Directions / live trip responses → show as persistent alert banner
+                const isDirectionsAction = data.action === 'get_directions' 
+                    || data.action === 'start_live_directions';
+                
+                if (data.response && isDirectionsAction) {
+                    showCommuteAlert({
+                        message: data.response,
+                        type: data.action === 'start_live_directions' ? 'live_trip' : 'directions',
+                        commute_label: data.action,
+                    });
+                } else if (data.response) {
                     showAIFeedback(data.response);
                 } else if (data.action && data.action !== 'message') {
                     chatInput.placeholder = 'Action completed. Tell Gemini to manage tickets...';
@@ -315,6 +427,8 @@ document.addEventListener('DOMContentLoaded', () => {
             feedbackArea.classList.remove('visible');
         }, 5000);
     };
+
+    // ── Commute Alert Polling ─────────────────────────────
 
     // Boot app
     checkAuthStatus();

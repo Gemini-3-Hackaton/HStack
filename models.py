@@ -8,6 +8,8 @@ class TicketType(str, Enum):
     HABIT = "HABIT"
     EVENT = "EVENT"
     TASK = "TASK"
+    COMMUTE = "COMMUTE"
+    AGENT_TASK = "AGENT_TASK"
 
 class TaskBase(BaseModel):
     userid: Optional[int] = None
