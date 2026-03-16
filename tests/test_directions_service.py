@@ -8,6 +8,9 @@ import services.directions.main as directions_main
 
 
 class DirectionsServiceTests(unittest.TestCase):
+    client: TestClient | None = None
+    original_api_key: str | None = None
+
     def setUp(self):
         self.client = TestClient(directions_main.app)
         self.original_api_key = directions_main.os.environ.get("GOOGLE_MAPS_API_KEY")
@@ -20,6 +23,7 @@ class DirectionsServiceTests(unittest.TestCase):
             directions_main.os.environ["GOOGLE_MAPS_API_KEY"] = self.original_api_key
 
     def test_rejects_blank_origin_or_destination(self):
+        if self.client is None: self.fail("Client not initialized")
         response = self.client.post(
             "/directions",
             json={"origin": "   ", "destination": "Paris"},
@@ -38,6 +42,7 @@ class DirectionsServiceTests(unittest.TestCase):
             "The provided API key is invalid.",
         )
 
+        if self.client is None: self.fail("Client not initialized")
         response = self.client.post(
             "/directions",
             json={"origin": "Paris", "destination": "Lyon"},
@@ -54,6 +59,7 @@ class DirectionsServiceTests(unittest.TestCase):
         expected = [{"legs": [{"duration": {"text": "12 min", "value": 720}, "steps": []}]}]
         client_cls.return_value.directions.return_value = expected
 
+        if self.client is None: self.fail("Client not initialized")
         response = self.client.post(
             "/directions",
             json={"origin": "Paris", "destination": "Lyon"},

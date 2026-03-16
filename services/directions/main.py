@@ -41,6 +41,9 @@ def _format_google_error(exc: gmaps_exceptions.ApiError) -> str:
     return f"Google Maps error: {exc.status}"
 
 
+
+
+
 class DirectionRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
@@ -56,10 +59,10 @@ def get_directions(body: DirectionRequest):
     if not body.origin or not body.destination:
         raise HTTPException(status_code=400, detail="Both origin and destination are required.")
 
-    gmaps = googlemaps.Client(key=api_key)
-
+    # Type-safe client access
+    client = googlemaps.Client(key=api_key)
     try:
-        return gmaps.directions(
+        return client.directions(  # pyright: ignore[reportAttributeAccessIssue]
             origin=body.origin,
             destination=body.destination,
             mode="transit",
