@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+:root {
+    --bg-main: #0B0C0E;
+    --bg-surface: #1A1A1E;
+    --bg-input: #23242A;
+    --text-primary: #F2F2F2;
+    --text-secondary: #8A8F98;
+    --border-color: #ffffff1a;
+    --accent-blue: #5E6AD2;
+    --gemini-gradient: linear-gradient(135deg, #1A73E8, #8AB4F8, #D93025);
+    
+    --type-habit: #10B981;
+    --type-event: #F59E0B;
+    --type-task: #3B82F6;
+    --type-commute: #A78BFA;
+    
+    --font-inter: 'Inter', sans-serif;
+}
+
+@layer base {
+    html {
+        background-color: transparent;
+    }
+    body {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+        background-color: transparent;
+        color: var(--text-primary);
+        font-family: var(--font-inter);
+        height: 100vh;
+        width: 100vw;
+        overflow: hidden;
+        font-size: 15px;
+        -webkit-font-smoothing: antialiased;
+    }
+}
+
+@layer utilities {
+    .no-scrollbar::-webkit-scrollbar {
+        display: none;
+    }
+    .no-scrollbar {
+        -ms-overflow-style: none;
+        scrollbar-width: none;
+    }
+
+    .pearl-gradient {
+        position: absolute;
+        top: -150%;
+        left: -150%;
+        width: 400%;
+        height: 400%;
+        background: conic-gradient(
+            from 180deg at 50% 50%,
+            #FFFFFF 0deg,    
+            #5E6AD2 30deg,
+            #FFFFFF 60deg,
+            #E0E0FF 90deg,
+            #FFFFFF 120deg,
+            #5E6AD2 150deg,
+            #FFFFFF 180deg,
+            #E0E0FF 210deg,
+            #FFFFFF 240deg,
+            #5E6AD2 270deg,
+            #FFFFFF 300deg,
+            #E0E0FF 330deg,
+            #FFFFFF 360deg
+        );
+        filter: blur(40px);
+        opacity: 1.0;
+    }
+
+    .pearl-slow { animation: organic-rotate-slow 15s linear infinite; }
+    .pearl-fast { 
+        animation: organic-rotate-fast 4s linear infinite;
+        mask-image: radial-gradient(ellipse at center, black 10%, transparent 65%);
+        -webkit-mask-image: radial-gradient(ellipse at center, black 10%, transparent 65%);
+    }
+}
+
+@keyframes organic-rotate-slow {
+    0% { transform: rotate(0deg) scale(1); }
+    50% { transform: rotate(180deg) scale(1.05); }
+    100% { transform: rotate(360deg) scale(1); }
+}
+
+@keyframes organic-rotate-fast {
+    0% { transform: rotate(0deg) scale(1); }
+    50% { transform: rotate(180deg) scale(1.1); }
+    100% { transform: rotate(360deg) scale(1); }
+}
+
+@keyframes slideUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes alertSlideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
