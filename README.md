@@ -8,7 +8,7 @@ HStack is an AI-native task management system powered by Google Gemini. You talk
 
 No forms. No dropdowns. Just tell it what's going on.
 
-![alt text](image.png)
+![alt text](docs/assets/image.png)
 ---
 
 ## Core Concept
@@ -69,9 +69,9 @@ When an AI agent or IDE is working on something in the background:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                  Frontend                        │
-│         Vanilla JS · WebGL Shaders · CSS         │
-│    Chat → /api/chat    Polls → /api/commute-alerts│
+│                  Frontend (Tauri)                │
+│       React · WebGL Shaders · Tailwind CSS       │
+│    Chat → /api/chat    Polls → /api/sync         │
 └───────────────┬─────────────────┬───────────────┘
                 │                 │
         ┌───────▼───────┐  ┌─────▼──────────────┐
@@ -125,25 +125,21 @@ DIRECTIONS_SERVICE_URL=http://localhost:8001   # optional, this is the default
 
 ### Running
 
-**1. Start the Directions microservice:**
+**1. Start the Backend Server:**
 
 ```bash
-cd services/directions
-uv run uvicorn main:app --port 8001 --reload
+uv run uvicorn hstack.main:app --port 8000 --reload
 ```
 
-> Important: start this from the `services/directions/` directory so it loads the correct `main.py`.
-
-**2. Start the main application:**
+**2. Start the Tauri Desktop App:**
 
 ```bash
-cd /path/to/HStack
-uv run uvicorn main:app --port 8080 --reload
+cd frontend
+npm install
+npm run tauri dev
 ```
 
-**3. Open the app:**
-
-Navigate to [http://127.0.0.1:8080](http://127.0.0.1:8080).
+The app will launch in a standalone, borderless window.
 
 ---
 
