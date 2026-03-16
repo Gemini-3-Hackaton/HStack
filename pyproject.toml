@@ -11,8 +11,8 @@ dependencies = [
     "googlemaps>=4.10.0",
     "passlib[bcrypt]>=1.7.4",
     "pydantic>=2.12.5",
-    "python-dotenv>=1.2.2",
     "uvicorn[standard]>=0.41.0",
+    "websockets>=16.0",
 ]
 
 [tool.setuptools.packages.find]

@@ -1,0 +1,28 @@
+{
+  "dependencies": {
+    "@varlock/bitwarden-plugin": "^0.0.4",
+    "varlock": "^0.5.0"
+  },
+  "name": "hstack",
+  "version": "1.0.0",
+  "description": "**The auto-kanban for normal people who want to think about less things.**",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HStack-Org/HStack.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/HStack-Org/HStack/issues"
+  },
+  "homepage": "https://github.com/HStack-Org/HStack#readme"
+}
