@@ -4,6 +4,7 @@ import { Send, X, ChevronDown, Plus, ChevronRight, Wifi, WifiOff } from "lucide-
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { WebGLGrain } from "./components/WebGLGrain";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -15,6 +16,96 @@ const formatDate = (dateString?: string) => {
     if (!dateString) return "";
     const date = new Date(dateString);
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
+
+// --- Engraved Dark Themes ---
+
+const THEMES = {
+  habit: {
+    c1: [42, 52, 48],
+    c2: [32, 38, 35], 
+    c3: [24, 26, 25], 
+    c4: [20, 20, 20]
+  },
+  event: {
+    c1: [54, 48, 40],
+    c2: [36, 34, 31], 
+    c3: [25, 24, 23], 
+    c4: [20, 20, 20]
+  },
+  default: {
+    c1: [48, 48, 48], 
+    c2: [34, 34, 34], 
+    c3: [24, 24, 24], 
+    c4: [20, 20, 20]
+  }
+};
+
+type ThemeColors = typeof THEMES.default;
+
+// --- Physical Wrapper (Moat Architecture) ---
+
+const PhysicalWrapper = ({ children, outerClass = '', innerClass = '', checked = false, shaderColors = THEMES.default }: {
+  children: React.ReactNode;
+  outerClass?: string;
+  innerClass?: string;
+  checked?: boolean;
+  shaderColors?: ThemeColors;
+}) => (
+  <div className={cn(
+      "relative transition-all duration-300 bg-[#141414] p-[4px] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem]",
+      checked ? "opacity-50" : "opacity-100",
+      outerClass
+  )}>
+    <div className={cn(
+        "relative w-full h-full overflow-hidden shadow-[0_2px_5px_rgba(0,0,0,0.7)] rounded-[15px]",
+        innerClass
+    )}>
+      <WebGLGrain colors={shaderColors} />
+      {/* Zero-Blur Creases */}
+      <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03] z-10" />
+      <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03] z-10" />
+      <div className="relative z-20 w-full h-full">
+        {children}
+      </div>
+    </div>
+  </div>
+);
+
+// --- Tag Component (Carved from material) ---
+
+const Tag = ({ text, type, italic, cardTheme = THEMES.default }: {
+  text: string;
+  type: string;
+  italic?: boolean;
+  cardTheme?: ThemeColors;
+}) => {
+  const borderColor = `rgba(${cardTheme.c1[0]}, ${cardTheme.c1[1]}, ${cardTheme.c1[2]}, 0.25)`;
+  const baseClasses = "text-[9px] font-bold tracking-widest px-1.5 py-1 rounded border transition-colors uppercase whitespace-nowrap";
+
+  if (type === 'info') {
+    return (
+      <span 
+        className={cn(baseClasses, "bg-[#252525] text-[#888]", italic && "italic")}
+        style={{ borderColor }}
+      >
+        {text}
+      </span>
+    );
+  }
+
+  let colorClass = 'text-[#888] bg-[#222]';
+  if (type === 'habit') colorClass = 'text-emerald-400/80 bg-emerald-950/40';
+  if (type === 'event') colorClass = 'text-amber-400/80 bg-amber-950/40';
+  
+  return (
+    <span 
+      className={cn(baseClasses, colorClass)}
+      style={{ borderColor }}
+    >
+      {text}
+    </span>
+  );
 };
 
 // --- Scope Components ---
@@ -155,39 +246,9 @@ const TicketCard = ({ task }: { task: TaskModel }) => {
     const isCompleted = payload.completed === true;
     const title = payload.title || 'Untitled';
     const type = task.type || 'TASK';
-    const isAgentTask = type === 'AGENT_TASK';
-    const isCountdown = type === 'COUNTDOWN';
-    const expiresAt = payload.expires_at ? new Date(payload.expires_at).getTime() : null;
-
-    const [timeLeft, setTimeLeft] = useState<string>("");
-    const [expired, setExpired] = useState(false);
-
-    useEffect(() => {
-        if (!expiresAt) return;
-
-        const updateTimer = () => {
-            const remaining = expiresAt - Date.now();
-            if (remaining <= 0) {
-                setTimeLeft('DONE');
-                setExpired(true);
-                return true; // finished
-            }
-            const mins = Math.floor(remaining / 60000);
-            const secs = Math.floor((remaining % 60000) / 1000);
-            setTimeLeft(`${mins}:${secs.toString().padStart(2, '0')}`);
-            return false;
-        };
-
-        const finished = updateTimer();
-        if (finished) return;
-
-        const interval = setInterval(() => {
-            const done = updateTimer();
-            if (done) clearInterval(interval);
-        }, 1000);
-
-        return () => clearInterval(interval);
-    }, [expiresAt]);
+    const typeLower = type.toLowerCase();
+    
+    const theme = typeLower === 'habit' ? THEMES.habit : typeLower === 'event' ? THEMES.event : THEMES.default;
 
     const handleToggle = (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -195,87 +256,61 @@ const TicketCard = ({ task }: { task: TaskModel }) => {
     };
 
     return (
-        <div 
-            className={cn(
-                "ticket-card bg-[var(--bg-surface)] border border-[var(--border-color)] rounded-[12px] p-4 flex items-center gap-4 transition-all duration-200 cursor-default animate-[slideUp_0.3s_ease-out] hover:translate-y-[-2px] hover:shadow-[0_6px_16px_rgba(0,0,0,0.4)] hover:border-[rgba(255,255,255,0.15)]",
-                isCompleted && "opacity-60",
-                isAgentTask && "border-l-[3px] border-l-[#FBBF24]",
-                isCountdown && "border-l-[3px] border-l-[#38BDF8]"
-            )}
-        >
-            <div 
-                onClick={handleToggle}
-                className={cn(
-                    "ticket-status w-5 h-5 border-2 border-[var(--text-secondary)] rounded-[6px] flex items-center justify-center cursor-pointer shrink-0 transition-all duration-200",
-                    isCompleted && "bg-[var(--accent-blue)] border-[var(--accent-blue)] after:content-[''] after:w-[5px] after:height-[10px] after:border-solid after:border-white after:border-width-[0_2px_2px_0] after:rotate-45 after:mb-[3px]"
-                )}
-            />
-            <div className="ticket-content flex-1 overflow-hidden flex items-center justify-between gap-4">
-                <div>
-                    <div className={cn(
-                        "ticket-title text-[var(--text-primary)] font-medium text-[15px] line-height-[1.4]",
-                        isCompleted && "text-[var(--text-secondary)] line-through"
+        <div onClick={handleToggle} className="cursor-default animate-[slideUp_0.3s_ease-out]">
+            <PhysicalWrapper 
+                outerClass="mb-0" 
+                innerClass="p-4 flex items-start gap-4" 
+                checked={isCompleted} 
+                shaderColors={theme}
+            >
+                <div className="flex-1 min-w-0">
+                    <h3 className={cn(
+                        "font-medium text-[16px] tracking-wide text-[#d1d1d1] truncate transition-colors duration-300",
+                        isCompleted && "line-through text-[#555]"
                     )}>
                         {title}
-                    </div>
-                    <div className="ticket-meta flex items-center gap-2 mt-1.5 overflow-x-auto no-scrollbar">
-                        <span className={cn(
-                            "type-badge text-[10px] font-bold uppercase tracking-[1px] px-2 py-0.5 rounded-[5px] bg-[rgba(255,255,255,0.05)]",
-                            type.toLowerCase() === 'habit' && "text-[var(--type-habit)]",
-                            type.toLowerCase() === 'event' && "text-[var(--type-event)]",
-                            type.toLowerCase() === 'task' && "text-[var(--type-task)]",
-                            type.toLowerCase() === 'commute' && "text-[var(--type-commute)] bg-[rgba(167,139,250,0.15)]"
-                        )}>
-                            {type.replace('_', ' ')}
-                        </span>
-                        
-                        {payload.scheduled_time && (
-                            <span className="text-[10px] font-bold text-[var(--text-secondary)] uppercase tracking-[1px] px-2 py-0.5 rounded-[5px] bg-[rgba(255,255,255,0.05)] border border-white/5 whitespace-nowrap">
-                                {payload.scheduled_time}
-                            </span>
-                        )}
-
-                        {payload.recurrence && (
-                            <span className="text-[10px] font-bold text-[var(--text-secondary)] opacity-40 uppercase tracking-[1.5px] whitespace-nowrap italic">
-                                {payload.recurrence}
-                            </span>
-                        )}
-
+                    </h3>
+                    <div className="flex flex-wrap items-center gap-2 mt-2">
+                        <Tag text={type.replace('_', ' ')} type={typeLower} cardTheme={theme} />
+                        {payload.scheduled_time && <Tag text={payload.scheduled_time} type="info" cardTheme={theme} />}
+                        {payload.recurrence && <Tag text={payload.recurrence} type="info" italic={true} cardTheme={theme} />}
                         {!payload.scheduled_time && task.created_at && (
-                            <span className="ticket-date text-[11px] text-[var(--text-secondary)] opacity-40">
-                                {formatDate(task.created_at)}
-                            </span>
+                            <Tag text={formatDate(task.created_at)} type="info" cardTheme={theme} />
                         )}
                     </div>
                 </div>
-            </div>
+            </PhysicalWrapper>
         </div>
     );
 };
 
 const CommuteAlert = ({ message, type, onDismiss }: { message: string, type: string, onDismiss: () => void }) => {
     const isLiveTrip = type === 'live_trip' || type === 'live_trip_expired';
-    const isExpired = type === 'live_trip_expired';
+    const alertTheme = isLiveTrip ? { c1: [60, 30, 30], c2: [40, 24, 24], c3: [28, 20, 20], c4: [20, 20, 20] } : THEMES.default;
 
     return (
-        <div className={cn(
-            "commute-alert relative overflow-hidden p-[14px_18px] rounded-[12px] bg-gradient-to-br from-[rgba(167,139,250,0.12)] to-[rgba(94,106,210,0.08)] border border-[rgba(167,139,250,0.25)] animate-[alertSlideIn_0.4s_ease-out] before:content-[''] before:absolute before:top-0 before:left-0 before:w-[3px] before:h-full before:bg-[var(--type-commute)] before:rounded-[3px_0_0_3px]",
-            isLiveTrip && "from-[rgba(239,68,68,0.12)] to-[rgba(249,115,22,0.08)] border-[rgba(239,68,68,0.3)] before:bg-[#EF4444]"
-        )}>
-            <button 
-                onClick={onDismiss}
-                className="commute-alert-dismiss absolute top-2 right-2.5 bg-none border-none text-[var(--text-secondary)] cursor-pointer text-[16px] p-[2px_6px] rounded-[4px] transition-colors hover:text-[var(--text-primary)]"
+        <div className="animate-[alertSlideIn_0.4s_ease-out]">
+            <PhysicalWrapper 
+                outerClass="mb-0" 
+                innerClass="p-4 flex flex-col gap-2 relative" 
+                shaderColors={alertTheme}
             >
-                <X size={14} />
-            </button>
-            {isLiveTrip && !isExpired && (
-                <div className="live-badge inline-block bg-[#EF4444] text-white text-[10px] font-bold tracking-[1px] px-2 py-0.5 rounded-[4px] mb-1.5 animate-[pulse_2s_infinite]">
-                    LIVE
+                <button 
+                    onClick={onDismiss}
+                    className="absolute top-3 right-3 text-[#777] hover:text-white transition-colors z-30"
+                >
+                    <X size={14} />
+                </button>
+                {isLiveTrip && (
+                    <div className="text-[9px] font-bold tracking-widest text-red-500/80 uppercase mb-1 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                        LIVE TRIP
+                    </div>
+                )}
+                <div className="text-[14px] text-[#d1d1d1] leading-relaxed italic opacity-90">
+                    {message}
                 </div>
-            )}
-            <div className="commute-alert-message text-[13px] text-[var(--text-primary)] leading-[1.6] whitespace-pre-line">
-                {message}
-            </div>
+            </PhysicalWrapper>
         </div>
     );
 };
@@ -285,7 +320,7 @@ function App() {
     const { tasks, syncNow, isConnected } = useSync();
     const [inputValue, setInputValue] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
-    const [placeholder, setPlaceholder] = useState("Tell Gemini to manage tickets...");
+    const [placeholder, setPlaceholder] = useState("Tell AI to manage your stack...");
     const [alerts, setAlerts] = useState<any[]>([]);
     const [feedback, setFeedback] = useState<string | null>(null);
     const [integrations, setIntegrations] = useState<string[]>([]); // No integrations by default
@@ -324,7 +359,7 @@ function App() {
 
         setInputValue("");
         setIsProcessing(true);
-        setPlaceholder("Gemini is processing your action...");
+        setPlaceholder("Processing your action...");
 
         try {
             const resp = await fetch('http://localhost:8000/api/chat', {
@@ -350,16 +385,16 @@ function App() {
                 } else if (data.response) {
                     showFeedback(data.response);
                 } else if (data.action && data.action !== 'message') {
-                    setPlaceholder("Action completed. Tell Gemini to manage tickets...");
-                    setTimeout(() => setPlaceholder("Tell Gemini to manage tickets..."), 3000);
+                    setPlaceholder("Action completed.");
+                    setTimeout(() => setPlaceholder("Tell AI to manage your stack..."), 3000);
                 }
             } else {
                 setPlaceholder("Error communicating with AI.");
-                setTimeout(() => setPlaceholder("Tell Gemini to manage tickets..."), 3000);
+                setTimeout(() => setPlaceholder("Tell AI to manage your stack..."), 3000);
             }
         } catch (err) {
             setPlaceholder("Network error reaching the server.");
-            setTimeout(() => setPlaceholder("Tell Gemini to manage tickets..."), 3000);
+            setTimeout(() => setPlaceholder("Tell AI to manage your stack..."), 3000);
         } finally {
             setIsProcessing(false);
             if (inputRef.current) inputRef.current.focus();
@@ -373,8 +408,22 @@ function App() {
 
     return (
         <main 
-            className="app-container w-screen h-screen flex flex-col relative bg-[#0B0C0E] rounded-[24px] overflow-hidden border border-white/10 shadow-2xl transition-all duration-300 ease-out"
+            className="app-container w-screen h-screen flex flex-col relative bg-[#080808] rounded-[24px] overflow-hidden border border-white/15 shadow-2xl transition-all duration-300 ease-out"
         >
+            {/* Full-page dithered background */}
+            <WebGLGrain 
+                colors={{
+                    c1: [16, 16, 16],
+                    c2: [12, 12, 12], 
+                    c3: [9, 9, 9], 
+                    c4: [6, 6, 6] 
+                }}
+                spreadX={0.35}
+                spreadY={1.1}
+                contrast={2.0}
+                noiseFactor={0.7}
+                opacity={1.0}
+            />
             {/* Header Area (Draggable) */}
             <header 
                 onPointerDown={(e) => {
@@ -382,7 +431,7 @@ function App() {
                         tauriWindow.current.startDragging().catch(console.error);
                     }
                 }}
-                className="user-header pt-[80px] pb-[16px] px-6 shrink-0 relative bg-[var(--bg-main)] cursor-default select-none z-10"
+                className="user-header pt-[80px] pb-[16px] px-6 shrink-0 relative bg-transparent cursor-default select-none z-10"
             >
                 {/* Top Interaction Row - Perfectly Aligned */}
                 <div className="absolute top-[22px] left-[22px] right-[22px] h-9 flex items-center justify-between pointer-events-none">
@@ -438,7 +487,7 @@ function App() {
             </header>
 
             {/* Scrollable Content */}
-            <section className="stack-container flex-1 overflow-y-auto no-scrollbar pb-4 flex flex-col">
+            <section className="stack-container flex-1 overflow-y-auto no-scrollbar pb-4 flex flex-col relative z-10">
                 <div className="px-6 pt-4 flex flex-col">
                     <div className="commute-alerts-container flex flex-col gap-2.5 mb-6">
                         {alerts.map(alert => (
@@ -496,9 +545,17 @@ function App() {
                 <div className="h-[20px] shrink-0"></div>
             </section>
 
-            {/* Chat Area (Integrated Footer) */}
-            <div className="chat-container w-full bg-[#1A1A1E] border-t border-white/10 z-30">
-                <div className="w-full relative">
+            {/* Moat Transition Bar */}
+            <div className="w-full h-[6px] bg-[#141414] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] z-20 shrink-0" />
+
+            {/* Chat Area — Full width, flush to window */}
+            <div className="chat-container w-full z-30 relative overflow-hidden shrink-0">
+                {/* Grain background matching card tiles */}
+                <WebGLGrain colors={THEMES.default} />
+                {/* Top crease */}
+                <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03] z-10" />
+                
+                <div className="relative z-20">
                     {feedback && (
                         <div className="ai-feedback-toast absolute bottom-full left-1/2 -translate-x-1/2 bg-[rgba(26,26,30,0.95)] border border-[rgba(138,180,248,0.3)] text-[#8AB4F8] p-[10px_20px] rounded-[20px] text-[13px] font-medium whitespace-nowrap mb-4 backdrop-blur-[10px] shadow-2xl animate-in fade-in slide-in-from-bottom-2">
                             {feedback}
@@ -508,7 +565,7 @@ function App() {
                     <form 
                         onSubmit={handleAction} 
                         className={cn(
-                            "chat-input-wrapper flex items-end bg-transparent p-[16px_24px_24px] transition-all duration-400 relative overflow-hidden",
+                            "chat-input-wrapper flex items-end bg-transparent p-[20px_24px_28px] transition-all duration-400 relative overflow-hidden",
                             isProcessing && "shadow-[inset_0_0_30px_rgba(99,102,241,0.1)]"
                         )}
                     >
@@ -530,7 +587,7 @@ function App() {
                                 }
                             }}
                             placeholder={placeholder}
-                            className="flex-1 bg-transparent border-none text-[var(--text-primary)] text-[15px] outline-none resize-none min-h-[40px] max-h-[120px] leading-[1.6] relative z-10 placeholder:text-[var(--text-secondary)]"
+                            className="flex-1 bg-transparent border-none text-[#d1d1d1] text-[14px] outline-none resize-none min-h-[40px] max-h-[120px] leading-[1.6] relative z-10 placeholder:text-[#555]"
                         />
                         <button 
                             type="submit" 
