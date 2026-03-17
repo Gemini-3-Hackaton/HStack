@@ -551,7 +551,7 @@ function App() {
             {/* Chat Area — Full width, flush to window */}
             <div className="chat-container w-full z-30 relative overflow-hidden shrink-0">
                 {/* Grain background matching card tiles */}
-                <WebGLGrain colors={THEMES.default} />
+                <WebGLGrain colors={{ c1: [30, 30, 30], c2: [22, 22, 22], c3: [16, 16, 16], c4: [12, 12, 12] }} />
                 {/* Top crease */}
                 <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03] z-10" />
                 
