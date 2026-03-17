@@ -289,36 +289,16 @@ function App() {
     const [alerts, setAlerts] = useState<any[]>([]);
     const [feedback, setFeedback] = useState<string | null>(null);
     const [integrations, setIntegrations] = useState<string[]>([]); // No integrations by default
-    const [isExpanded, setIsExpanded] = useState(false);
-    const [isChangingSize, setIsChangingSize] = useState(false);
 
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const tauriWindow = useRef(getCurrentWindow());
 
-    // Window size management with visual smoothing
-    useEffect(() => {
-        const updateWindowSize = async () => {
-            setIsChangingSize(true);
-            
-            if (isExpanded) {
-                // Expand window first
-                await tauriWindow.current.setSize(new LogicalSize(400, 700));
-                // Wait a tiny bit for layout
-                await new Promise(r => setTimeout(r, 40));
-            } else {
-                // Wait for content fade
-                await new Promise(r => setTimeout(r, 60));
-                await tauriWindow.current.setSize(new LogicalSize(64, 64));
-            }
-            
-            setIsChangingSize(false);
-        };
-        updateWindowSize();
-    }, [isExpanded]);
-
-    const toggleExpand = (e?: React.MouseEvent) => {
+    const minimizeWindow = (e?: React.MouseEvent) => {
         if (e) e.stopPropagation();
-        setIsExpanded(!isExpanded);
+        console.log("Minimizing window...");
+        tauriWindow.current.minimize().catch(err => {
+            console.error("Failed to minimize window:", err);
+        });
     };
 
     // Initial load
@@ -391,39 +371,9 @@ function App() {
         setTimeout(() => setFeedback(null), 5000);
     };
 
-    if (!isExpanded) {
-        return (
-            <div 
-                onPointerDown={(e) => {
-                    if (e.button === 0) { 
-                        tauriWindow.current.startDragging().catch(console.error);
-                    }
-                }}
-                onClick={toggleExpand}
-                className={cn(
-                    "w-[64px] h-[64px] bg-[#0B0C0E] rounded-full flex items-center justify-center cursor-pointer hover:bg-[rgba(255,255,255,0.08)] overflow-hidden relative group border border-white/25 transition-all duration-300 ease-out",
-                    isChangingSize ? "opacity-0 scale-90" : "opacity-100 scale-100"
-                )}
-            >
-                <div className="w-[34px] h-[34px] text-white transition-opacity group-hover:opacity-80 pointer-events-none select-none flex items-center justify-center">
-                    <svg viewBox="0 0 210 211" fill="currentColor" className="w-full h-full">
-                        <rect x="0" y="10" width="60" height="191" />
-                        <rect x="150" y="10" width="60" height="191" />
-                        <rect x="50" y="50" width="100" height="31" />
-                        <rect x="50" y="90" width="100" height="31" />
-                        <rect x="50" y="130" width="100" height="31" />
-                    </svg>
-                </div>
-            </div>
-        );
-    }
-
     return (
         <main 
-            className={cn(
-                "app-container w-screen h-screen flex flex-col relative bg-[#0B0C0E] rounded-[24px] overflow-hidden border border-white/10 shadow-2xl transition-all duration-300 ease-out",
-                isChangingSize ? "opacity-0 scale-95" : "opacity-100 scale-100"
-            )}
+            className="app-container w-screen h-screen flex flex-col relative bg-[#0B0C0E] rounded-[24px] overflow-hidden border border-white/10 shadow-2xl transition-all duration-300 ease-out"
         >
             {/* Header Area (Draggable) */}
             <header 
@@ -437,7 +387,7 @@ function App() {
                 {/* Top Interaction Row - Perfectly Aligned */}
                 <div className="absolute top-[22px] left-[22px] right-[22px] h-9 flex items-center justify-between pointer-events-none">
                     <button 
-                        onClick={toggleExpand}
+                        onClick={minimizeWindow}
                         className="w-9 h-9 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all pointer-events-auto bg-white/5 rounded-full hover:bg-white/10"
                     >
                         <ChevronDown size={20} />
