@@ -92,7 +92,7 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
   useEffect(() => {
     let reconnectTimer: any;
     const connect = async () => {
-      const ws = new WebSocket(`ws://localhost:8000/ws/sync/${userId}`);
+      const ws = new WebSocket(`ws://127.0.0.1:8000/ws/sync/${userId}`);
       wsRef.current = ws;
 
       ws.onopen = async () => {

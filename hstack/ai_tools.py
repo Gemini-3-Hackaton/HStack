@@ -101,6 +101,18 @@ create_ticket_function_schema = {
             "title": {
                 "type": "STRING",
                 "description": "The title or description of the ticket"
+            },
+            "scheduled_time": {
+                "type": "STRING",
+                "description": "Optional: Specific time for the ticket (e.g., '9 AM', '14:30', '2026-03-17 15:00'). Triggers the 'Scope' visual sidebar."
+            },
+            "duration_minutes": {
+                "type": "INTEGER",
+                "description": "Optional: Estimated duration in minutes."
+            },
+            "recurrence": {
+                "type": "STRING",
+                "description": "Optional: Recurrence DSL for HABITs. Use formats like: 'DAILY', 'WEEKDAYS', 'MON, WED, FRI', '9TH OF MONTH', '9TH, 10TH OF MONTH', '1ST MON OF MONTH'."
             }
         },
         "required": ["type", "title"]
@@ -133,7 +145,7 @@ delete_all_tickets_function_schema = {
 
 edit_ticket_function_schema = {
     "name": "edit_ticket",
-    "description": "Edit an existing ticket in the user's stack. You can change its type or its title payload.",
+    "description": "Edit an existing ticket in the user's stack. You can change its type, title, or timing.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -148,6 +160,18 @@ edit_ticket_function_schema = {
             "title": {
                 "type": "STRING",
                 "description": "The new title/description. Skip if no change."
+            },
+            "scheduled_time": {
+                "type": "STRING",
+                "description": "The new scheduled time. Skip if no change."
+            },
+            "duration_minutes": {
+                "type": "INTEGER",
+                "description": "The new duration. Skip if no change."
+            },
+            "recurrence": {
+                "type": "STRING",
+                "description": "The new recurrence pattern. Skip if no change."
             }
         },
         "required": ["task_id"]

@@ -331,76 +331,65 @@ async def chat_with_gemini(req: ChatRequest):
                 "tools": ai_tools.chat_tools,
                 "system_instruction": f"""You are a ticket management assistant for HStack.
     You manage a 'stack' of tickets for the user. 
-    You MUST ONLY use the provided tools to create, delete, edit, clear tickets, manage commutes, or get directions.
+
+    CRITICAL: TEMPORAL EXTRACTION & NORMALIZATION
+    1. EXTRACT scheduled_time: Mandate extraction of any temporal data (e.g. 15:00).
+    2. NORMALIZE scheduled_time: Always convert to HH:MM (24-hour) e.g. "08:00". No conversational text.
+    3. SCHEDULING DSL for HABITs:
+       - If a HABIT is repetitive, use the `recurrence` parameter with this DSL:
+         - Standard: `EVERY DAY`, `WEEKDAYS`, `WEEKENDS`.
+         - Days: `MON, WED, FRI` (use 3-letter uppercase).
+         - Monthly: `9TH OF MONTH`, `9TH, 10TH OF MONTH`.
+         - Ordinal: `1ST MON OF MONTH`, `LAST FRI OF MONTH`.
+       - Example: "Add habit to gym on Mon, Wed and Fri at 6pm" -> `scheduled_time: "18:00", recurrence: "MON, WED, FRI"`
+       - Example: "I need to pay the landlord on the 1st and 15th of every month at 9am" -> `scheduled_time: "09:00", recurrence: "1ST, 15TH OF MONTH"`
+    
+    The `scheduled_time` field is what triggers the visual "Scope" side-bars in the UI.
 
     CURRENT TICKET STACK (JSON):
     {context_str}
 
     TICKET CATEGORIES:
-    - HABIT: Things that happen every day or routines (e.g., 'exercise', 'brush teeth', 'morning coffee').
-    - TASK: Things that need to be done once, one-off actions (e.g., 'buy groceries').
-    - EVENT: Meetings or time-specific appointments (e.g., 'dentist at 3pm').
+    - HABIT: Routines (e.g., 'morning coffee').
+    - TASK: One-off actions (e.g., 'buy groceries').
+    - EVENT: Time-specific appointments (e.g., 'dentist').
 
     COMMUTE MANAGEMENT:
-    - When the user describes a recurring trip (e.g., "I go from X to Y every morning at 9:30"), call `add_commute`.
-    - Extract origin, destination, the arrival deadline in HH:MM format, a short label, and which days.
-    - If no days are specified, default to weekdays (monday through friday).
-    - The system will automatically send transit alerts 30 minutes before the deadline, every 5 minutes.
-    - Existing commutes appear in the ticket stack above with type "COMMUTE".
-    - To remove a commute, use `remove_commute` with the task_id.
-
-    LIVE / URGENT DIRECTIONS:
-    - When the user says "I need to get to X in N minutes" or "I'm at X, I need to be at Y by HH:MM", call `start_live_directions`.
-    - This is for ONE-TIME urgent trips, NOT recurring commutes.
-    - It will immediately show directions AND keep updating every 5 minutes until the deadline.
-    - Calculate minutes_until_deadline from the user's phrasing (e.g. "in 30 mins" = 30, "by 17:00" = minutes from now to 17:00).
-
-    DIRECTIONS:
-    - When the user asks "how do I get from A to B?" or wants live directions NOW without a deadline, call `get_directions`.
-    - This returns real-time transit routes (one-shot, no periodic updates).
-
-    AGENT TASKS (background timers):
-    - When the user mentions an AI agent, IDE, or tool working on something in the background, call `create_agent_task`.
-    - Examples: "VSCode is working on...", "Cursor is fixing...", "Copilot is generating...", "The AI is analyzing..."
-    - This creates a timed ticket with a countdown. It auto-deletes when the timer expires.
-    - Default timer is 10 minutes. User can specify a different duration.
-
-    PERSONAL COUNTDOWNS:
-    - When the user says they need to do something within a certain time, call `create_countdown`.
-    - Trigger phrases: "I need to ... in N minutes", "I have to ... in N min", "I should ... in 1 hour", etc.
-    - Extract the action as the title and the duration in minutes.
-    - This creates a COUNTDOWN ticket with a live timer. It auto-deletes when the timer expires.
-    - IMPORTANT: This is different from a regular TASK. Use `create_countdown` when there is a specific time constraint ("in 30 min", "in 1 hour").
-
-    MULTI-ACTION DECOMPOSITION (V7):
-    - You are empowered to call MULTIPLE tools in a single turn if a user request is complex.
-    - BREAK DOWN requests into discrete logical steps. 
-    - Example: "Go grab the laundry detergent for my mum and kibble for my cat" 
-      -> Call `create_ticket` for "Buy laundry detergent" (TASK)
-      -> Call `create_ticket` for "Buy kibble for cat" (TASK)
-      -> Call `create_ticket` for "Bring detergent to mum" (TASK)
-
-    CONSISTENCY RULES:
-    1. If the user asks to create a ticket that already exists or conflicts with an existing one, inform the user instead of calling a tool.
-    2. When deleting, use the exact `id` from the context provided above.
-    3. For 'clear everything', call `delete_all_tickets`.
-
-    ACT AS A PURE ACTION MODEL:
-    - Respond strictly with a brief, sexy confirmation of the actions taken.
-    - If there is a conflict, explain it concisely.""",
+    - Recurring trips -> `add_commute`.
+    - Live/Urgent trips -> `start_live_directions`.
+    
+    ACTION RULES:
+    1. BREAK DOWN complex requests into multiple tool calls.
+    2. ALWAYS use the provided tools for state changes.
+    3. Respond with a brief, sexy confirmation of actions taken.""",
             }
         )
         
-        func_calls = getattr(response, 'function_calls', [])
+        # Extract function calls from the response
+        func_calls = []
+        try:
+            if response.candidates:
+                for part in response.candidates[0].content.parts:
+                    if part.function_call:
+                        func_calls.append(part.function_call)
+        except Exception:
+            # Fallback for different SDK versions or properties
+            func_calls = getattr(response, 'function_calls', [])
+
         actions_taken = []
         directions_text = None
         if func_calls:
             for call in func_calls:
                 if call.name == "create_ticket":
                     ticket_type = call.args.get("type", "TASK")
-                    title = call.args.get("title", "Untitled")
-                    payload_str = json.dumps({"title": title, "completed": False})
-                    await database.create_task(req.userid, ticket_type, payload_str)
+                    
+                    # Capture all other args into the payload
+                    p_load = {"completed": False}
+                    for key, val in call.args.items():
+                        if key != "type":
+                            p_load[key] = val
+                            
+                    await database.create_task(req.userid, ticket_type, json.dumps(p_load))
                     actions_taken.append("create")
                     
                 elif call.name == "delete_ticket":
@@ -420,12 +409,23 @@ async def chat_with_gemini(req: ChatRequest):
                     tid = call.args.get("task_id", "")
                     new_type = call.args.get("type")
                     new_title = call.args.get("title")
+                    new_time = call.args.get("scheduled_time")
+                    new_dur = call.args.get("duration_minutes")
                     
-                    update_payload = None
-                    if new_title:
-                        update_payload = json.dumps({"title": new_title, "completed": False})
+                    # Fetch current payload to merge
+                    existing_task = await database.get_task(tid)
+                    curr_payload = {}
+                    if existing_task and existing_task.get("payload"):
+                        try:
+                            curr_payload = json.loads(existing_task["payload"])
+                        except Exception:
+                            pass
                     
-                    await database.update_task(tid, new_type, update_payload)
+                    if new_title: curr_payload["title"] = new_title
+                    if new_time: curr_payload["scheduled_time"] = new_time
+                    if new_dur: curr_payload["duration_minutes"] = new_dur
+                    
+                    await database.update_task(tid, new_type, json.dumps(curr_payload))
                     actions_taken.append("edit")
 
                 elif call.name == "add_commute":
