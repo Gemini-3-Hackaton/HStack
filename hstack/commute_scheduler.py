@@ -11,69 +11,51 @@ import asyncio
 import json
 import time
 from datetime import datetime, timedelta
-from typing import Any
-from collections import defaultdict
+from typing import TYPE_CHECKING, cast
 
 from . import ai_tools
 from . import database
 
-
-# ── In-memory notification store ──────────────────────────────────────
-# { userid: [ { "commute_label": ..., "message": ..., "routes": ..., "ts": ... }, ... ] }
-_alerts: dict[int, list[dict[str, Any]]] = defaultdict(list)
+if TYPE_CHECKING:
+    from collections.abc import Callable, Awaitable
 
 # Track when we last called directions per (userid, task_id) to enforce 5-min interval
 _last_call: dict[tuple[int, str], float] = {}
 
 # ── In-memory live trips (urgent one-time directions) ────────────────
 # { trip_id: { "userid": int, "origin": str, "destination": str,
-#              "deadline_ts": float, "created_ts": float, "label": str } }
-_live_trips: dict[str, dict[str, Any]] = {}
-_live_trip_counter = 0
+#              "deadline_ts": float, "created_ts": float, "label": str, "deadline_str": str, "task_id": str | None } }
+_live_trips: dict[str, dict[str, object]] = {}
+_live_trip_counter: int = 0
 
-ALERT_WINDOW_MINUTES = 30   # start alerting this many minutes before deadline
-CALL_INTERVAL_SECONDS = 300  # call directions every 5 minutes
-MAX_ALERTS_PER_USER = 20     # keep the list bounded
+ALERT_WINDOW_MINUTES: int = 30   # start alerting this many minutes before deadline
+CALL_INTERVAL_SECONDS: int = 300  # call directions every 5 minutes
 
-
-def get_alerts(userid: int) -> list[dict[str, Any]]:
-    """Return and clear pending alerts for a user."""
-    alerts = list(_alerts.get(userid, []))
-    _alerts[userid] = []
-    return alerts
-
-
-def peek_alerts(userid: int) -> list[dict[str, Any]]:
-    """Return pending alerts WITHOUT clearing them."""
-    return list(_alerts.get(userid, []))
-
-
-def _push_alert(userid: int, alert: dict[str, Any]) -> None:
-    _alerts[userid].append(alert)
-    # trim old alerts
-    if len(_alerts[userid]) > MAX_ALERTS_PER_USER:
-        _alerts[userid] = _alerts[userid][-MAX_ALERTS_PER_USER:]
-
-
-def clear_user(userid: int):
-    """Wipe all in-memory state for a user: alerts, live trips, and call timers."""
-    _alerts.pop(userid, None)
-
-    # Remove all live trips belonging to this user
-    trip_ids = [tid for tid, t in _live_trips.items() if t["userid"] == userid]
-    for tid in trip_ids:
-        del _live_trips[tid]
-
+def clear_user(userid: int) -> None:
+    """
+    Wipe all in-memory call timers for a user.
+    
+    Args:
+        userid: The ID of the user to clear
+    """
     # Remove all _last_call entries for this user
     keys = [k for k in _last_call if k[0] == userid]
     for k in keys:
-        del _last_call[k]
-
-    print(f"[CommuteScheduler] Cleared all state for user {userid}")
+        _last_call.pop(k, None)
+    print(f"[CommuteScheduler] Cleared state for user {userid}")
 
 
 def _is_in_alert_window(deadline_str: str, now: datetime) -> bool:
-    """Check if `now` is within [deadline - 30min, deadline]."""
+    """
+    Check if `now` is within [deadline - 30min, deadline].
+    
+    Args:
+        deadline_str: HH:MM deadline
+        now: Current time
+        
+    Returns:
+        True if within the 30-minute window
+    """
     try:
         h, m = map(int, deadline_str.split(":"))
         deadline_today = now.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -84,7 +66,16 @@ def _is_in_alert_window(deadline_str: str, now: datetime) -> bool:
 
 
 def _day_matches(days_csv: str, now: datetime) -> bool:
-    """Check if today's day name is in the comma-separated list."""
+    """
+    Check if today's day name is in the comma-separated list.
+    
+    Args:
+        days_csv: Comma-separated day names (e.g. "mon,wed,fri")
+        now: Current time
+        
+    Returns:
+        True if today matches the schedule
+    """
     if not days_csv:
         # default: weekdays
         return now.weekday() < 5
@@ -111,18 +102,30 @@ _VEHICLE_ICON = {
 }
 
 
-def _format_commute_alert(label: str, routes: list[dict[str, Any]], deadline_str: str, now: datetime) -> str:
-    """Build a human-readable alert message from parsed routes."""
+def _format_commute_alert(label: str, routes: list[dict[str, object]], deadline_str: str, now: datetime) -> str:
+    """
+    Build a human-readable alert message from parsed routes.
+    
+    Args:
+        label: Commute label
+        routes: List of parsed route dictionaries
+        deadline_str: HH:MM deadline
+        now: Current time
+        
+    Returns:
+        A multi-line formatted string for the user
+    """
     if not routes:
-        return f"🚇 {label}: No transit routes found right now."
+        return f"No transit routes found for {label} right now."
 
     fastest = routes[0]  # already sorted by duration
 
     # Detect if the route has any transit steps
-    transit_steps = [s for s in fastest.get("steps", []) if s.get("travel_mode") == "TRANSIT"]
+    steps = cast(list[dict[str, object]], fastest.get("steps", []))
+    transit_steps = [s for s in steps if s.get("travel_mode") == "TRANSIT"]
     walk_only = len(transit_steps) == 0
 
-    lines = []
+    lines: list[str] = []
     lines.append(f"📍 {label.replace('_', ' ').title()}")
 
     # Duration header — only show dep/arr times when transit is involved
@@ -140,12 +143,12 @@ def _format_commute_alert(label: str, routes: list[dict[str, Any]], deadline_str
         lines.append("No public transit needed for this distance.")
     else:
         # Build step-by-step itinerary
-        for step in fastest.get("steps", []):
+        for step in steps:
             mode = step.get("travel_mode", "")
             if mode == "WALKING":
                 lines.append(f"🚶 Walk {step.get('duration', '')}")
             elif mode == "TRANSIT":
-                vtype = step.get("vehicle_type", "")
+                vtype = str(step.get("vehicle_type", ""))
                 icon = _VEHICLE_ICON.get(vtype, "🚍")
                 line_name = step.get("transit_line", "?")
                 dep_stop = step.get("departure_stop", "")
@@ -178,12 +181,13 @@ def _format_commute_alert(label: str, routes: list[dict[str, Any]], deadline_str
 
     # Show alternative routes summary if available
     if len(routes) > 1:
-        alts = []
+        alts: list[str] = []
         for r in routes[1:3]:
-            alt_transit = []
-            for s in r.get("steps", []):
+            alt_transit: list[str] = []
+            r_steps = cast(list[dict[str, object]], r.get("steps", []))
+            for s in r_steps:
                 if s.get("travel_mode") == "TRANSIT":
-                    vt = s.get("vehicle_type", "")
+                    vt = str(s.get("vehicle_type", ""))
                     ic = _VEHICLE_ICON.get(vt, "🚍")
                     alt_transit.append(f"{ic}{s.get('transit_line', '?')}")
             chain = " → ".join(alt_transit) if alt_transit else "🚶 Walk"
@@ -200,13 +204,25 @@ def _format_commute_alert(label: str, routes: list[dict[str, Any]], deadline_str
 # ── Live trip management ─────────────────────────────────────────────
 
 def register_live_trip(userid: int, origin: str, destination: str,
-                       minutes_until_deadline: int) -> str:
-    """Register an urgent one-time trip. Returns the trip_id."""
+                       minutes_until_deadline: int, task_id: str | None = None) -> str:
+    """
+    Register an urgent one-time trip.
+    
+    Args:
+        userid: Owner ID
+        origin: Start address
+        destination: End address
+        minutes_until_deadline: Time left
+        task_id: UUID of the persistent ticket
+        
+    Returns:
+        Local trip ID
+    """
     global _live_trip_counter
     _live_trip_counter += 1
     trip_id = f"live_{_live_trip_counter}"
-    now = time.time()
-    deadline_ts = now + (minutes_until_deadline * 60)
+    now_f = time.time()
+    deadline_ts = now_f + (minutes_until_deadline * 60)
     deadline_dt = datetime.fromtimestamp(deadline_ts)
 
     _live_trips[trip_id] = {
@@ -214,104 +230,135 @@ def register_live_trip(userid: int, origin: str, destination: str,
         "origin": origin,
         "destination": destination,
         "deadline_ts": deadline_ts,
-        "created_ts": now,
-        "label": f"🚨 Trip to {destination[:40]}",
+        "created_ts": now_f,
+        "label": f"Trip to {destination[:40]}",
         "deadline_str": deadline_dt.strftime("%H:%M"),
+        "task_id": task_id
     }
     # Force immediate first call by NOT setting _last_call
-    print(f"[LiveTrip] Registered {trip_id} for user {userid}: "
-          f"{origin[:30]} → {destination[:30]} deadline in {minutes_until_deadline}min")
+    print(f"[LiveTrip] Registered {trip_id} for user {userid}")
     return trip_id
 
 
-def get_active_live_trips(userid: int) -> list[dict[str, Any]]:
-    """Return all active live trips for a user."""
-    now = time.time()
+def get_active_live_trips(userid: int) -> list[dict[str, object]]:
+    """
+    Return all active live trips for a user.
+    
+    Args:
+        userid: The user's ID
+        
+    Returns:
+        List of active trip info
+    """
+    now_f = time.time()
     return [
         {**trip, "trip_id": tid,
-         "minutes_remaining": max(0, int((trip["deadline_ts"] - now) / 60))}
+         "minutes_remaining": max(0, int((cast(float, trip["deadline_ts"]) - now_f) / 60))}
         for tid, trip in _live_trips.items()
-        if trip["userid"] == userid and trip["deadline_ts"] > now
+        if trip["userid"] == userid and cast(float, trip["deadline_ts"]) > now_f
     ]
 
 
-async def _check_live_trips():
-    """Check all live trips, call directions every 5 min, expire when deadline passes."""
+async def _check_live_trips(broadcast_callback: "Callable[[int], Awaitable[None]] | None" = None) -> None:
+    """
+    Check all live trips, call directions every 5 min, expire when deadline passes.
+    
+    Args:
+        broadcast_callback: Optional callback to notify frontend of updates.
+    """
     now_ts = time.time()
-    now = datetime.now()
-    expired = []
+    expired: list[str] = []
 
     for trip_id, trip in _live_trips.items():
+        userid = cast(int, trip["userid"])
+        deadline_ts = cast(float, trip["deadline_ts"])
+        task_id = cast(str | None, trip.get("task_id"))
+        
         # Expired?
-        if now_ts > trip["deadline_ts"]:
+        if now_ts > deadline_ts:
             expired.append(trip_id)
-            # Send a final "deadline passed" alert
-            mins_ago = int((now_ts - trip["deadline_ts"]) / 60)
-            _push_alert(trip["userid"], {
-                "commute_label": trip["label"],
-                "trip_id": trip_id,
-                "message": f"⏰ {trip['label']} – deadline has passed ({mins_ago} min ago). Live tracking stopped.",
-                "routes": [],
-                "ts": now.isoformat(),
-                "type": "live_trip_expired",
-            })
+            if task_id:
+                try:
+                    _ = await database.update_task_status(task_id, "expired")
+                    if broadcast_callback:
+                        await broadcast_callback(userid)
+                except Exception as e:
+                    print(f"[LiveTrip] Failed to set expired status: {e}")
             continue
 
         # Enforce 5-min interval
-        key = (trip["userid"], trip_id)
-        last = _last_call.get(key, 0)
+        key = (userid, trip_id)
+        last = _last_call.get(key, 0.0)
         if now_ts - last < CALL_INTERVAL_SECONDS:
             continue
 
         _last_call[key] = now_ts
-        mins_left = max(0, int((trip["deadline_ts"] - now_ts) / 60))
+        mins_left = max(0, int((deadline_ts - now_ts) / 60))
 
         try:
-            raw_response = await ai_tools.call_directions_service(
-                trip["origin"], trip["destination"]
-            )
-            # Ensure we pass the 'routes' list which parse_transit_directions expects
-            raw_routes = raw_response.get("routes", []) if isinstance(raw_response, dict) else []
+            origin = str(trip["origin"])
+            destination = str(trip["destination"])
+            raw_response = await ai_tools.call_directions_service(origin, destination)
+            raw_routes = cast(list[dict[str, object]], raw_response.get("routes", []))
             parsed = ai_tools.parse_transit_directions(raw_routes)
-            message = _format_commute_alert(
-                trip["label"], parsed, trip["deadline_str"], now
-            )
-            # Prepend urgency countdown
-            message = f"⏳ {mins_left} min left until deadline\n{message}"
-
-            _push_alert(trip["userid"], {
-                "commute_label": trip["label"],
-                "trip_id": trip_id,
-                "message": message,
-                "routes": parsed[:3],
-                "ts": now.isoformat(),
-                "type": "live_trip",
-                "minutes_remaining": mins_left,
-            })
-            print(f"[LiveTrip] Alert pushed for {trip_id} – {mins_left}min remaining")
+            
+            # Update ticket payload
+            if task_id:
+                existing = await database.get_task(task_id)
+                if existing:
+                    payload_raw = existing.get("payload")
+                    curr_payload: dict[str, object] = {}
+                    if isinstance(payload_raw, str):
+                        curr_payload = cast(dict[str, object], json.loads(payload_raw))
+                    
+                    curr_payload["directions"] = {
+                        "steps": parsed[0].get("steps", []) if parsed else [],
+                        "total_duration": parsed[0].get("total_duration", "Unknown") if parsed else "Unknown",
+                        "departure_time": parsed[0].get("departure_time", "") if parsed else "",
+                        "arrival_time": parsed[0].get("arrival_time", "") if parsed else "",
+                        "error": None if parsed else "No routes found"
+                    }
+                    curr_payload["minutes_remaining"] = mins_left
+                    _ = await database.update_task_payload(task_id, json.dumps(curr_payload))
+                
+                if broadcast_callback:
+                    await broadcast_callback(userid)
+            
         except Exception as e:
-            print(f"[LiveTrip] Directions failed for {trip_id}: {e}")
-            _push_alert(trip["userid"], {
-                "commute_label": trip["label"],
-                "trip_id": trip_id,
-                "message": f"⚠️ Could not fetch directions: {e}\n⏳ {mins_left} min left",
-                "routes": [],
-                "ts": now.isoformat(),
-                "type": "live_trip",
-            })
+            print(f"[LiveTrip] Directions failed: {e}")
+            if task_id:
+                try:
+                    existing = await database.get_task(task_id)
+                    if existing:
+                        p_raw = existing.get("payload")
+                        curr_p: dict[str, object] = {}
+                        if isinstance(p_raw, str):
+                            curr_p = cast(dict[str, object], json.loads(p_raw))
+                        
+                        directions = cast(dict[str, object], curr_p.get("directions", {}))
+                        directions["error"] = str(e)
+                        curr_p["directions"] = directions
+                        curr_p["minutes_remaining"] = mins_left
+                        _ = await database.update_task_payload(task_id, json.dumps(curr_p))
+                        if broadcast_callback:
+                            await broadcast_callback(userid)
+                except Exception: pass
 
     # Clean up expired trips
     for tid in expired:
-        del _live_trips[tid]
-        # Also clean up _last_call entries
+        _live_trips.pop(tid, None)
         keys_to_del = [k for k in _last_call if k[1] == tid]
         for k in keys_to_del:
-            del _last_call[k]
-        print(f"[LiveTrip] Expired and removed {tid}")
+            _last_call.pop(k, None)
 
 
-async def _check_commutes():
-    """Single pass: check all commute tasks and fire alerts if needed."""
+async def _check_commutes(broadcast_callback: "Callable[[int], Awaitable[None]] | None" = None) -> None:
+    """
+    Single pass: check all commute tasks and update payloads directly.
+    
+    Args:
+        broadcast_callback: Optional callback to notify frontend of updates.
+    """
     try:
         if database.pool is None:
             return
@@ -325,33 +372,32 @@ async def _check_commutes():
         now = datetime.now()
 
         for row in rows:
-            row = dict(row)
-            userid = row.get("userid")
-            task_id = str(row.get("id"))
-            payload = row.get("payload")
-            if isinstance(payload, str):
+            record: dict[str, object] = dict(row)
+            userid = cast(int | None, record.get("userid"))
+            task_id = str(record.get("id"))
+            payload_raw = record.get("payload")
+            payload: dict[str, object] = {}
+            if isinstance(payload_raw, str):
                 try:
-                    payload = json.loads(payload)
+                    payload = cast(dict[str, object], json.loads(payload_raw))
                 except Exception:
                     continue
-            if not isinstance(payload, dict):
+            
+            if not payload or payload.get("live"):
                 continue
 
-            label = payload.get("label", "commute")
-            origin = payload.get("origin")
-            destination = payload.get("destination")
-            deadline = payload.get("deadline")
-            days = payload.get("days", "")
+            label = str(payload.get("label", "commute"))
+            origin = cast(str | None, payload.get("origin"))
+            destination = cast(str | None, payload.get("destination"))
+            deadline = cast(str | None, payload.get("deadline"))
+            days = str(payload.get("days", ""))
 
             if not all([origin, destination, deadline]):
                 continue
 
-            # Check day and time window
             if not _day_matches(days, now):
                 continue
-            if not deadline or not isinstance(deadline, str):
-                continue
-            if not _is_in_alert_window(deadline, now):
+            if not deadline or not _is_in_alert_window(deadline, now):
                 continue
 
             if userid is None:
@@ -367,38 +413,38 @@ async def _check_commutes():
 
             # Call directions service
             try:
-                if origin and destination and deadline:
-                    raw_response = await ai_tools.call_directions_service(origin, destination)
-                    # Ensure we pass the 'routes' list
-                    raw_routes = raw_response.get("routes", []) if isinstance(raw_response, dict) else []
-                    parsed = ai_tools.parse_transit_directions(raw_routes)
-                    message = _format_commute_alert(label, parsed, deadline, now)
-                    _push_alert(userid, {
-                        "commute_label": label,
-                        "task_id": task_id,
-                        "message": message,
-                        "routes": parsed[:3],  # top 3 routes
-                        "ts": now.isoformat(),
-                    })
-                print(f"[CommuteScheduler] Alert pushed for user {userid}: {label}")
+                if origin and destination:
+                    raw_res = await ai_tools.call_directions_service(origin, destination)
+                    routes_raw = cast(list[dict[str, object]], raw_res.get("routes", []))
+                    parsed = ai_tools.parse_transit_directions(routes_raw)
+                    
+                    payload["directions"] = {
+                        "steps": parsed[0].get("steps", []) if parsed else [],
+                        "total_duration": parsed[0].get("total_duration", "Unknown") if parsed else "Unknown",
+                        "departure_time": parsed[0].get("departure_time", "") if parsed else "",
+                        "arrival_time": parsed[0].get("arrival_time", "") if parsed else ""
+                    }
+                    
+                    _ = await database.update_task(task_id, payload=json.dumps(payload), status="in_focus")
+                    
+                    if broadcast_callback:
+                        await broadcast_callback(userid)
             except Exception as e:
-                print(f"[CommuteScheduler] Directions call failed for {label}: {e}")
-                _push_alert(userid, {
-                    "commute_label": label,
-                    "task_id": task_id,
-                    "message": f"⚠️ Could not fetch directions for {label}: {e}",
-                    "routes": [],
-                    "ts": now.isoformat(),
-                })
+                print(f"[CommuteScheduler] Call failed: {e}")
 
     except Exception as e:
-        print(f"[CommuteScheduler] Error in check loop: {e}")
+        print(f"[CommuteScheduler] Error in loop: {e}")
 
 
-async def run_scheduler():
-    """Background loop – runs forever, checking every 60 seconds."""
+async def run_scheduler(broadcast_callback: "Callable[[int], Awaitable[None]] | None" = None) -> None:
+    """
+    Background loop – runs forever, checking every 60 seconds.
+    
+    Args:
+        broadcast_callback: Optional callback to notify frontend of updates.
+    """
     print("[CommuteScheduler] Started ✓")
     while True:
-        await _check_commutes()
-        await _check_live_trips()
+        await _check_commutes(broadcast_callback)
+        await _check_live_trips(broadcast_callback)
         await asyncio.sleep(60)

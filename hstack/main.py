@@ -3,17 +3,76 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import json
-from typing import Any
+from typing import TYPE_CHECKING, cast, Any
+if TYPE_CHECKING:
+    from google.genai.types import FunctionCall
 import asyncio
 from contextlib import asynccontextmanager
 from . import database
 from .models import TaskCreate, UserCreate, UserLogin
 import os
 from . import ai_tools
-import bcrypt
 from . import commute_scheduler
+import bcrypt
 
-def verify_password(plain_password, hashed_password):
+async def enrich_commute_ticket(task_id: str, origin: str, destination: str) -> None:
+    """
+    Background task to fetch directions and update a ticket's payload.
+    
+    Args:
+        task_id: The UUID of the task to enrich
+        origin: Trip starting point
+        destination: Trip destination
+    """
+    try:
+        from . import ai_tools
+        raw_resp: dict[str, object] = await ai_tools.call_directions_service(origin, destination)
+        raw_routes = raw_resp.get("routes", [])
+        if not isinstance(raw_routes, list):
+            raw_routes = []
+            
+        parsed = ai_tools.parse_transit_directions(raw_routes)
+        if parsed:
+            # Fetch current task to avoid overwriting other fields
+            task_record = await database.get_task(task_id)
+            if not task_record:
+                return
+            
+            p_load: dict[str, Any] = json.loads(task_record["payload"])
+            directions: dict[str, Any] = p_load.get("directions", {})
+            directions.update({
+                "steps": parsed[0].get("steps", []),
+                "total_duration": parsed[0].get("total_duration", "Unknown"),
+                "departure_time": parsed[0].get("departure_time", ""),
+                "arrival_time": parsed[0].get("arrival_time", ""),
+                "error": None
+            })
+            p_load["directions"] = directions
+            await database.update_task_payload(task_id, json.dumps(p_load))
+    except Exception as e:
+        print(f"Background enrichment failed for ticket {task_id}: {e}")
+        try:
+            task_record = await database.get_task(task_id)
+            if task_record:
+                p_load: dict[str, Any] = json.loads(task_record["payload"])
+                directions: dict[str, Any] = p_load.get("directions", {})
+                directions["error"] = f"Information unavailable: {e}"
+                p_load["directions"] = directions
+                await database.update_task_payload(task_id, json.dumps(p_load))
+        except Exception:
+            pass
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a plain text password against a bcrypt hash.
+    
+    Args:
+        plain_password: The password to check
+        hashed_password: The stored hash
+        
+    Returns:
+        True if the password matches, False otherwise
+    """
     try:
         return bcrypt.checkpw(
             plain_password[:72].encode('utf-8'),
@@ -22,7 +81,16 @@ def verify_password(plain_password, hashed_password):
     except Exception:
         return False
 
-def get_password_hash(password):
+def get_password_hash(password: str) -> str:
+    """
+    Generate a bcrypt hash for a password.
+    
+    Args:
+        password: The plain text password
+        
+    Returns:
+        The hex-encoded hash string
+    """
     return bcrypt.hashpw(
         password[:72].encode('utf-8'),
         bcrypt.gensalt()
@@ -66,8 +134,8 @@ async def lifespan(app: FastAPI):
         print("Database connected successfully!")
     except Exception as e:
         print(f"Database connection failed (mock mode active): {e}")
-    # Start the commute scheduler as a background task
-    scheduler_task = asyncio.create_task(commute_scheduler.run_scheduler())
+    # Start the commute scheduler with a broadcast callback
+    scheduler_task = asyncio.create_task(commute_scheduler.run_scheduler(manager.broadcast_state_update))
     yield
     scheduler_task.cancel()
     try:
@@ -127,7 +195,7 @@ async def websocket_sync_endpoint(websocket: WebSocket, userid: int):
                         action_id = action.get("action_id")
                         entity_id = action.get("entity_id")
                         entity_type = action.get("entity_type", "TASK")
-                        payload = action.get("payload", {})
+                        payload = action.get("payload")
                         
                         try:
                             # 1. Log Event to event store
@@ -137,14 +205,15 @@ async def websocket_sync_endpoint(websocket: WebSocket, userid: int):
                                 action_type=action_type,
                                 entity_id=entity_id,
                                 entity_type=entity_type,
-                                payload=payload
+                                payload=payload or {}
                             )
 
                             # 2. Apply Event to Task table (Materialized View style)
                             if action_type == "CREATE":
-                                await database.create_task(userid=userid, type=entity_type, payload=json.dumps(payload))
+                                await database.create_task(userid=userid, type=entity_type, payload=json.dumps(payload or {}), status=action.get("status", "idle"))
                             elif action_type == "UPDATE":
-                                await database.update_task_payload(task_id=entity_id, payload=json.dumps(payload))
+                                p_str = json.dumps(payload) if payload is not None else None
+                                await database.update_task(task_id=entity_id, payload=p_str, status=action.get("status"))
                             elif action_type == "DELETE":
                                 await database.delete_task(task_id=entity_id)
 
@@ -186,7 +255,9 @@ async def get_tasks(userid: int):
         for t in tasks:
             if isinstance(t.get('payload'), str):
                 try:
-                    t['payload'] = json.loads(t['payload'])
+                    payload_str = t['payload']
+                    if isinstance(payload_str, str):
+                        t['payload'] = json.loads(payload_str)
                 except Exception:
                     pass
         return tasks
@@ -246,7 +317,7 @@ async def create_task(task: TaskCreate):
         )
         
         # 2. Materialize
-        row = await database.create_task(task.userid, task.type.value, payload_str)
+        row = await database.create_task(task.userid, task.type.value, payload_str, status=task.status.value)
         if row:
             res = dict(row)
             if isinstance(res.get('payload'), str):
@@ -261,21 +332,24 @@ async def create_task(task: TaskCreate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.patch("/api/tasks/{task_id}/status")
+async def update_task_status(task_id: str, status: str, userid: int):
+    try:
+        row = await database.update_task_status(task_id, status)
+        if row:
+            await manager.broadcast_state_update(userid)
+            return dict(row)
+        raise HTTPException(status_code=404, detail="Task not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 class ChatRequest(BaseModel):
     message: str
     userid: int
 
 
-# ── Commute alerts endpoint ──────────────────────────────────────────
-@app.get("/api/commute-alerts/{userid}")
-async def get_commute_alerts(userid: int):
-    """Poll this endpoint to get pending commute direction alerts for a user."""
-    alerts = commute_scheduler.get_alerts(userid)
-    return {"alerts": alerts}
-
-
 @app.get("/api/commutes/{userid}")
-async def get_user_commutes(userid: int):
+async def get_user_commutes(userid: int) -> list[dict[str, object]]:
     """List all registered commutes for a user."""
     if database.pool is None:
         raise HTTPException(status_code=500, detail="Database not connected")
@@ -284,12 +358,13 @@ async def get_user_commutes(userid: int):
             "SELECT * FROM public.task WHERE userid = $1 AND type = 'COMMUTE' ORDER BY created_at ASC",
             userid,
         )
-    commutes = []
+    commutes: list[dict[str, object]] = []
     for r in rows:
-        d = dict(r)
-        if isinstance(d.get("payload"), str):
+        d: dict[str, object] = dict(r)
+        payload_raw = d.get("payload")
+        if isinstance(payload_raw, str):
             try:
-                d["payload"] = json.loads(d["payload"])
+                d["payload"] = json.loads(payload_raw)
             except Exception:
                 pass
         commutes.append(d)
@@ -297,13 +372,22 @@ async def get_user_commutes(userid: int):
 
 
 @app.get("/api/live-trips/{userid}")
-async def get_live_trips(userid: int):
+async def get_live_trips(userid: int) -> dict[str, list[dict[str, object]]]:
     """List active live/urgent direction trips for a user."""
     return {"trips": commute_scheduler.get_active_live_trips(userid)}
 
 
 @app.post("/api/chat")
-async def chat_with_gemini(req: ChatRequest):
+async def chat_with_gemini(req: ChatRequest) -> dict[str, object]:
+    """
+    Main chat endpoint that processes messages with Gemini and executes tool calls.
+    
+    Args:
+        req: The chat request containing message and user context
+        
+    Returns:
+        JSON response with the action taken or the assistant's message
+    """
     if not ai_tools.client:
         return {"action": "message", "response": "Warning: GEMINI_API_KEY is not set in `.env`."}
 
@@ -311,7 +395,7 @@ async def chat_with_gemini(req: ChatRequest):
     current_tickets = await database.fetch_all_tasks(req.userid)
     
     # Custom encoder for UUID and datetime
-    def custom_encoder(obj):
+    def custom_encoder(obj: object) -> str:
         from uuid import UUID
         from datetime import datetime
         if isinstance(obj, UUID):
@@ -361,234 +445,168 @@ async def chat_with_gemini(req: ChatRequest):
     ACTION RULES:
     1. BREAK DOWN complex requests into multiple tool calls.
     2. ALWAYS use the provided tools for state changes.
-    3. Respond with a brief, sexy confirmation of actions taken.""",
+    3. NO EMOJIS in ticket titles or descriptions. Keep them clean and professional.
+    4. Respond with a brief, sexy confirmation of actions taken.""",
             }
         )
         
         # Extract function calls from the response
-        func_calls = []
+        func_calls: list[Any] = []
         try:
             if response.candidates:
-                for part in response.candidates[0].content.parts:
-                    if part.function_call:
-                        func_calls.append(part.function_call)
+                parts = getattr(response.candidates[0].content, 'parts', [])
+                for part in parts:
+                    fc = getattr(part, 'function_call', None)
+                    if fc:
+                        func_calls.append(fc)
         except Exception:
             # Fallback for different SDK versions or properties
-            func_calls = getattr(response, 'function_calls', [])
+            raw_calls = getattr(response, 'function_calls', [])
+            if isinstance(raw_calls, list):
+                func_calls = raw_calls
 
-        actions_taken = []
-        directions_text = None
+        actions_taken: list[str] = []
         if func_calls:
-            for call in func_calls:
-                if call.name == "create_ticket":
-                    ticket_type = call.args.get("type", "TASK")
-                    
-                    # Capture all other args into the payload
-                    p_load = {"completed": False}
-                    for key, val in call.args.items():
+            for call_obj in func_calls:
+                # Use cast if we are sure it's a FunctionCall or has these attributes
+                call_name: str = str(getattr(call_obj, "name", ""))
+                call_args: dict[str, Any] = cast(dict[str, Any], getattr(call_obj, "args", {}))
+                
+                if call_name == "create_ticket":
+                    ticket_type = str(call_args.get("type", "TASK"))
+                    p_load: dict[str, object] = {"completed": False}
+                    for key, val in call_args.items():
                         if key != "type":
                             p_load[key] = val
-                            
-                    await database.create_task(req.userid, ticket_type, json.dumps(p_load))
+                    _ = await database.create_task(req.userid, ticket_type, json.dumps(p_load), status="idle")
                     actions_taken.append("create")
-                    
-                elif call.name == "delete_ticket":
-                    record_id = call.args.get("task_id", "")
-                    try:
-                        await database.delete_task(record_id)
-                        actions_taken.append("delete")
-                    except Exception:
-                        pass
 
-                elif call.name == "delete_all_tickets":
+                elif call_name == "delete_ticket":
+                    record_id = str(call_args.get("task_id", ""))
+                    try:
+                        _ = await database.delete_task(record_id)
+                        actions_taken.append("delete")
+                    except Exception: pass
+
+                elif call_name == "delete_all_tickets":
                     await database.delete_all_tasks(req.userid)
                     commute_scheduler.clear_user(req.userid)
                     actions_taken.append("clear")
 
-                elif call.name == "edit_ticket":
-                    tid = call.args.get("task_id", "")
-                    new_type = call.args.get("type")
-                    new_title = call.args.get("title")
-                    new_time = call.args.get("scheduled_time")
-                    new_dur = call.args.get("duration_minutes")
+                elif call_name == "edit_ticket":
+                    tid = str(call_args.get("task_id", ""))
+                    new_type = cast(str | None, call_args.get("type"))
+                    new_title = cast(str | None, call_args.get("title"))
+                    new_time = cast(str | None, call_args.get("scheduled_time"))
+                    new_dur = cast(int | None, call_args.get("duration_minutes"))
                     
-                    # Fetch current payload to merge
                     existing_task = await database.get_task(tid)
-                    curr_payload = {}
-                    if existing_task and existing_task.get("payload"):
-                        try:
-                            curr_payload = json.loads(existing_task["payload"])
-                        except Exception:
-                            pass
-                    
+                    curr_payload: dict[str, object] = {}
+                    if existing_task:
+                        p_raw = existing_task.get("payload")
+                        if isinstance(p_raw, str):
+                            try:
+                                curr_payload = cast(dict[str, object], json.loads(p_raw))
+                            except Exception: pass
+                            
                     if new_title: curr_payload["title"] = new_title
                     if new_time: curr_payload["scheduled_time"] = new_time
                     if new_dur: curr_payload["duration_minutes"] = new_dur
+                    _ = await database.update_task(tid, new_type, json.dumps(curr_payload))
+                    _ = actions_taken.append("edit")
+
+                elif call_name == "add_commute":
+                    label = str(call_args.get("label", "commute"))
+                    origin = str(call_args.get("origin", ""))
+                    destination = str(call_args.get("destination", ""))
+                    deadline = str(call_args.get("deadline", "09:00"))
+                    days = str(call_args.get("days", "monday,tuesday,wednesday,thursday,friday"))
                     
-                    await database.update_task(tid, new_type, json.dumps(curr_payload))
-                    actions_taken.append("edit")
+                    commute_data: dict[str, object] = {
+                        "title": f"{label.replace('_', ' ').title()}: {origin[:30]}… → {destination[:30]}… @ {deadline}",
+                        "label": label, "origin": origin, "destination": destination, 
+                        "deadline": deadline, "days": days, "completed": False,
+                    }
+                    _ = await database.create_task(req.userid, "COMMUTE", json.dumps(commute_data), status="idle")
+                    _ = actions_taken.append("add_commute")
 
-                elif call.name == "add_commute":
-                    label = call.args.get("label", "commute")
-                    origin = call.args.get("origin", "")
-                    destination = call.args.get("destination", "")
-                    deadline = call.args.get("deadline", "09:00")
-                    days = call.args.get("days", "monday,tuesday,wednesday,thursday,friday")
-
-                    commute_payload = json.dumps({
-                        "title": f"🚇 {label.replace('_', ' ').title()}: {origin[:30]}… → {destination[:30]}… @ {deadline}",
-                        "label": label,
-                        "origin": origin,
-                        "destination": destination,
-                        "deadline": deadline,
-                        "days": days,
-                        "completed": False,
-                    })
-                    await database.create_task(req.userid, "COMMUTE", commute_payload)
-                    actions_taken.append("add_commute")
-
-                elif call.name == "get_directions":
-                    origin = call.args.get("origin", "")
-                    destination = call.args.get("destination", "")
+                elif call_name == "remove_commute":
+                    record_id = str(call_args.get("task_id", ""))
                     try:
-                        raw_resp = await ai_tools.call_directions_service(origin, destination)
-                        raw_routes = raw_resp.get("routes", []) if isinstance(raw_resp, dict) else []
-                        parsed = ai_tools.parse_transit_directions(raw_routes)
-                        if parsed:
-                            from datetime import datetime as dt
-                            msg = commute_scheduler._format_commute_alert(
-                                "Directions", parsed, "", dt.now()
-                            )
-                        else:
-                            directions_text = "No transit routes found for that journey."
-                    except Exception as exc:
-                        directions_text = f"Could not fetch directions: {exc}"
-                    actions_taken.append("get_directions")
+                        _ = await database.delete_task(record_id)
+                        _ = actions_taken.append("remove_commute")
+                    except Exception: pass
 
-                elif call.name == "remove_commute":
-                    record_id = call.args.get("task_id", "")
-                    try:
-                        await database.delete_task(record_id)
-                        actions_taken.append("remove_commute")
-                    except Exception:
-                        pass
-
-                elif call.name == "start_live_directions":
-                    origin = call.args.get("origin", "")
-                    destination = call.args.get("destination", "")
-                    minutes = int(call.args.get("minutes_until_deadline", 30))
-
-                    # Register the live trip for periodic updates
-                    commute_scheduler.register_live_trip(
-                        req.userid, origin, destination, minutes
-                    )
-
-                    # Also fetch directions immediately so the user gets instant feedback
-                    try:
-                        raw_resp = await ai_tools.call_directions_service(origin, destination)
-                        raw_routes = raw_resp.get("routes", []) if isinstance(raw_resp, dict) else []
-                        parsed = ai_tools.parse_transit_directions(raw_routes)
-                        if parsed:
-                            from datetime import datetime as dt, timedelta, timezone
-                            now = dt.now()
-                            deadline_dt = now + timedelta(minutes=minutes)
-                            deadline_str = deadline_dt.strftime("%H:%M")
-                            msg = commute_scheduler._format_commute_alert(
-                                f"🚨 Trip to {destination[:40]}", parsed, deadline_str, now
-                            )
-                            directions_text = f"⏳ {minutes} min until deadline\n{msg}\n\n📡 Live tracking started – updates every 5 min."
-                        else:
-                            directions_text = f"No transit routes found. Live tracking started – will retry every 5 min for {minutes} min."
-                    except Exception as exc:
-                        directions_text = f"Could not fetch initial directions: {exc}\n📡 Live tracking started – will retry every 5 min."
-                    actions_taken.append("start_live_directions")
-
-                elif call.name == "create_agent_task":
-                    title = call.args.get("title", "Agent task")
-                    duration = int(call.args.get("duration_minutes", 10))
-                    from datetime import datetime, timedelta, timezone
-                    expires_at = datetime.now(timezone.utc) + timedelta(minutes=duration)
-                    payload = json.dumps({
-                        "title": title,
-                        "agent_task": True,
-                        "duration_minutes": duration,
-                        "expires_at": expires_at.isoformat()
-                    })
-                    created = await database.create_task(
-                        userid=req.userid,
-                        type="AGENT_TASK",
-                        payload=payload
-                    )
+                elif call_name == "get_directions":
+                    origin = str(call_args.get("origin", ""))
+                    destination = str(call_args.get("destination", ""))
+                    # Create the ticket IMMEDIATELY with a skeleton payload
+                    d_load: dict[str, object] = {
+                        "title": f"Directions: {origin[:30]}… → {destination[:30]}…",
+                        "origin": origin, "destination": destination,
+                        "directions": {"steps": [], "total_duration": "Enriching...", "error": None}
+                    }
+                    created = await database.create_task(req.userid, "COMMUTE", json.dumps(d_load), status="in_focus")
                     if created:
-                        task_id = created["id"]
-                        # Schedule auto-deletion when the timer expires
-                        async def _auto_delete(tid, delay):
-                            await asyncio.sleep(delay)
-                            try:
-                                await database.delete_task(tid)
-                            except Exception:
-                                pass
-                        asyncio.create_task(_auto_delete(task_id, duration * 60))
-                    actions_taken.append("create_agent_task")
+                        # Schedule background enrichment
+                        _ = asyncio.create_task(enrich_commute_ticket(str(cast(object, created["id"])), origin, destination))
+                    _ = actions_taken.append("get_directions")
 
-                elif call.name == "create_countdown":
-                    title = call.args.get("title", "Countdown")
-                    duration = int(call.args.get("duration_minutes", 30))
-                    from datetime import datetime, timedelta, timezone
-                    expires_at = datetime.now(timezone.utc) + timedelta(minutes=duration)
-                    payload = json.dumps({
-                        "title": title,
-                        "countdown": True,
-                        "duration_minutes": duration,
-                        "expires_at": expires_at.isoformat()
-                    })
-                    created = await database.create_task(
-                        userid=req.userid,
-                        type="COUNTDOWN",
-                        payload=payload
-                    )
+                elif call_name == "start_live_directions":
+                    origin = str(cast(object, call_args.get("origin", "")))
+                    destination = str(cast(object, call_args.get("destination", "")))
+                    minutes_raw = call_args.get("minutes_until_deadline", 30)
+                    minutes = int(minutes_raw) if isinstance(minutes_raw, (int, str, float)) else 30
+                    
+                    # Create the persistent ticket IMMEDIATELY
+                    l_load: dict[str, object] = {
+                        "title": f"Trip to {destination[:40]}",
+                        "origin": origin, "destination": destination,
+                        "live": True,
+                        "minutes_remaining": minutes,
+                        "directions": {"steps": [], "total_duration": "Enriching...", "error": None}
+                    }
+                    created = await database.create_task(req.userid, "COMMUTE", json.dumps(l_load), status="in_focus")
                     if created:
-                        task_id = created["id"]
-                        async def _auto_delete_cd(tid, delay):
-                            await asyncio.sleep(delay)
-                            try:
-                                await database.delete_task(tid)
-                            except Exception:
-                                pass
-                        asyncio.create_task(_auto_delete_cd(task_id, duration * 60))
-                    actions_taken.append("create_countdown")
+                        task_uuid = str(cast(object, created["id"]))
+                        # Register for scheduler
+                        _ = commute_scheduler.register_live_trip(req.userid, origin, destination, minutes, task_id=task_uuid)
+                        # Optionally enrich immediately too for faster UI feedback
+                        _ = asyncio.create_task(enrich_commute_ticket(task_uuid, origin, destination))
+                    _ = actions_taken.append("start_live_directions")
 
-            # Try to get text confirmation, fallback if not available
-            confirmation_text = None
-            try:
-                confirmation_text = response.text
-            except Exception:
-                pass
+                elif call_name == "create_countdown":
+                    c_title = str(cast(object, call_args.get("title", "Countdown")))
+                    dur_raw = call_args.get("duration_minutes", 30)
+                    c_duration = int(dur_raw) if isinstance(dur_raw, (int, str, float)) else 30
+                    from datetime import datetime, timedelta, timezone
+                    expires_at = datetime.now(timezone.utc) + timedelta(minutes=c_duration)
+                    c_load = json.dumps({"title": c_title, "duration_minutes": c_duration, "expires_at": expires_at.isoformat()})
+                    c_created = await database.create_task(userid=req.userid, type="COUNTDOWN", payload=c_load, status="idle")
+                    if c_created:
+                        ctid = str(cast(object, c_created["id"]))
+                        async def _auto_delete(task_id: str, delay: int) -> None:
+                            await asyncio.sleep(delay)
+                            try: await database.delete_task(task_id)
+                            except Exception: pass
+                        _ = asyncio.create_task(_auto_delete(ctid, c_duration * 60))
+                    _ = actions_taken.append("create_countdown")
+
+            # Try to get text confirmation
+            confirmation_text: str = "Action completed."
+            try: 
+                if response.text:
+                    confirmation_text = response.text
+            except Exception: pass
             
-            if not confirmation_text:
-                confirmation_text = "Action completed."
-
-            # If get_directions or start_live_directions was called, append the transit info
-            if ("get_directions" in actions_taken or "start_live_directions" in actions_taken) and directions_text:
-                confirmation_text = directions_text + "\n\n" + (confirmation_text or "")
-
-            # Broadcast WebSocket updates if tasks changed
-            if any(a in actions_taken for a in ["create", "delete", "clear", "edit", "add_commute", "remove_commute", "create_agent_task", "create_countdown"]):
+            # Broadcast WebSocket updates
+            if actions_taken:
                 await manager.broadcast_state_update(req.userid)
-
-            return {
-                "action": "multi" if len(actions_taken) > 1 else (actions_taken[0] if actions_taken else None),
-                "response": confirmation_text if actions_taken else "No changes made."
-            }
+            return {"action": "multi" if len(actions_taken) > 1 else (actions_taken[0] if actions_taken else None), "response": confirmation_text}
         else:
-            msg_text = None
-            try:
-                msg_text = response.text
-            except Exception:
-                pass
-            
-            if not msg_text:
-                msg_text = "I'm sorry, I couldn't process that."
+            msg_text = "I'm sorry, I couldn't process that."
+            try: msg_text = response.text
+            except Exception: pass
             return {"action": "message", "response": msg_text}
 
     except Exception as e:

@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { SyncProvider, useSync, TaskModel } from "./SyncEngine";
-import { Send, X, ChevronDown, Plus, ChevronRight, Wifi, WifiOff } from "lucide-react";
+import { Send, X, ChevronDown, Plus, Trash2, Wifi, WifiOff } from "lucide-react";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { WebGLGrain } from "./components/WebGLGrain";
+import { motion, AnimatePresence } from "framer-motion";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -74,14 +75,110 @@ const PhysicalWrapper = ({ children, outerClass = '', innerClass = '', checked =
 
 // --- Tag Component (Carved from material) ---
 
-const Tag = ({ text, type, italic, cardTheme = THEMES.default }: {
+// --- Specialized Expanded Components ---
+
+const CommuteSteps = ({ directions }: { directions: any }) => {
+  if (!directions) return null;
+
+  if (directions.error || directions.total_duration === 'Enriching...') {
+    const isEnriching = directions.total_duration === 'Enriching...' && !directions.error;
+    return (
+      <div className="mt-4 border-t border-white/5 pt-4 flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-500">
+        <span className="text-[10px] font-bold text-blue-400/60 uppercase tracking-widest">Directions Status</span>
+        <p className="text-[13px] text-white/50 italic leading-relaxed">
+          {isEnriching 
+            ? "Fetching transit data..." 
+            : `Service currently unreachable: ${directions.error?.includes('GOOGLE_MAPS_API_KEY') ? 'Configuration error (API Key)' : directions.error}`}
+        </p>
+      </div>
+    );
+  }
+
+  if (!directions.steps || directions.steps.length === 0) {
+    return (
+      <div className="mt-4 border-t border-white/5 pt-4 flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-500">
+        <span className="text-[10px] font-bold text-white/30 uppercase tracking-widest">Route Status</span>
+        <p className="text-[13px] text-white/50 italic leading-relaxed">No transit routes found for this itinerary.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 border-t border-white/5 pt-4 flex flex-col gap-4 animate-in fade-in slide-in-from-top-2 duration-500">
+      <div className="flex items-center justify-between">
+         <div className="flex flex-col">
+            <span className="text-[10px] font-bold text-white/30 uppercase tracking-widest">Estimated Arrival</span>
+            <span className="text-[14px] text-white/90 font-medium">{directions.arrival_time || 'Unknown'}</span>
+         </div>
+         <div className="flex flex-col items-end">
+            <span className="text-[10px] font-bold text-white/30 uppercase tracking-widest">Total Duration</span>
+            <span className="text-[14px] text-white/90 font-medium">{directions.total_duration || 'Unknown'}</span>
+         </div>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        {directions.steps.map((step: any, idx: number) => (
+          <div key={idx} className="flex gap-3 items-start">
+            <div className="flex flex-col items-center shrink-0 mt-1">
+              <div className="w-1.5 h-1.5 bg-white/20 rounded-sm" />
+              {idx < directions.steps.length - 1 && <div className="w-0.5 h-full min-h-[16px] bg-white/5 my-1" />}
+            </div>
+            <div className="flex-1">
+              <div className="text-[12px] text-white/80 leading-relaxed" dangerouslySetInnerHTML={{ __html: step.instruction }} />
+              {step.travel_mode === 'TRANSIT' && (
+                <div className="flex items-center gap-2 mt-1.5 grayscale opacity-70">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-white capitalize">
+                        {step.vehicle_type?.toLowerCase() || 'Transit'}
+                    </span>
+                    <span className="text-[10px] font-bold text-white/40">{step.transit_line}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const CountdownTimer = ({ expiresAt }: { expiresAt: string }) => {
+    const [timeLeft, setTimeLeft] = useState("");
+    
+    useEffect(() => {
+        const target = new Date(expiresAt).getTime();
+        const update = () => {
+            const now = new Date().getTime();
+            const diff = target - now;
+            if (diff <= 0) {
+                setTimeLeft("EXPIRED");
+                return;
+            }
+            const mins = Math.floor(diff / 60000);
+            const secs = Math.floor((diff % 60000) / 1000);
+            setTimeLeft(`${mins}:${secs.toString().padStart(2, '0')}`);
+        };
+        update();
+        const timer = setInterval(update, 1000);
+        return () => clearInterval(timer);
+    }, [expiresAt]);
+
+    return (
+        <div className="mt-4 flex flex-col items-center py-6 border-y border-white/5 bg-white/[0.02] rounded-lg">
+            <span className="text-[10px] font-bold text-white/30 uppercase tracking-[0.2em] mb-2">Time Remaining</span>
+            <span className="text-[42px] font-light tracking-widest text-white/90 tabular-nums font-mono">{timeLeft}</span>
+        </div>
+    );
+};
+
+const Tag = ({ text, type, italic, cardTheme = THEMES.default, glow = false }: {
   text: string;
   type: string;
   italic?: boolean;
   cardTheme?: ThemeColors;
+  glow?: boolean;
 }) => {
   const borderColor = `rgba(${cardTheme.c1[0]}, ${cardTheme.c1[1]}, ${cardTheme.c1[2]}, 0.25)`;
-  const baseClasses = "text-[9px] font-bold tracking-widest px-1.5 py-1 rounded border transition-colors uppercase whitespace-nowrap";
+  const baseClasses = "text-[9px] font-bold tracking-widest px-1.5 py-1 rounded-[4px] border transition-colors uppercase whitespace-nowrap";
 
   if (type === 'info') {
     return (
@@ -97,10 +194,12 @@ const Tag = ({ text, type, italic, cardTheme = THEMES.default }: {
   let colorClass = 'text-[#888] bg-[#222]';
   if (type === 'habit') colorClass = 'text-emerald-400/80 bg-emerald-950/40';
   if (type === 'event') colorClass = 'text-amber-400/80 bg-amber-950/40';
+  if (type === 'commute') colorClass = 'text-blue-400/80 bg-blue-950/40';
+  if (type === 'countdown') colorClass = 'text-red-400/80 bg-red-950/40';
   
   return (
     <span 
-      className={cn(baseClasses, colorClass)}
+      className={cn(baseClasses, colorClass, glow && "ring-1 ring-white/10 shadow-[0_0_10px_rgba(255,255,255,0.05)]")}
       style={{ borderColor }}
     >
       {text}
@@ -134,7 +233,7 @@ const ScopeBlock = ({ label, type, children }: ScopeBlockProps) => {
                 {/* Thin Side Bar */}
                 <div className="shrink-0 pl-[4px]">
                     <div className={cn(
-                        "w-[1.5px] h-full rounded-full transition-all duration-300",
+                        "w-[1.5px] h-full transition-all duration-300",
                         isWeek ? "bg-[#3B82F6]" : "bg-white/10"
                     )} />
                 </div>
@@ -148,16 +247,15 @@ const ScopeBlock = ({ label, type, children }: ScopeBlockProps) => {
 };
 
 const groupTasks = (tasks: TaskModel[]) => {
-    const grouped: { week: string | null; days: { [key: string]: TaskModel[] }; unplanned: TaskModel[] } = {
-        week: null,
+    const grouped: { inFocus: TaskModel | null; days: { [key: string]: TaskModel[] }; unplanned: TaskModel[] } = {
+        inFocus: null,
         days: {},
         unplanned: []
     };
 
-    // Helper to normalize time for sorting (e.g., "15:00" -> 1500)
+    // Helper to normalize time for sorting
     const timeToValue = (timeStr?: string) => {
         if (!timeStr) return 999999;
-        // Match HH:MM or HH (AM/PM optional)
         const match = timeStr.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?/i);
         if (match) {
             let hours = parseInt(match[1]);
@@ -178,6 +276,11 @@ const groupTasks = (tasks: TaskModel[]) => {
     });
 
     sortedTasks.forEach(task => {
+        if (task.status === 'in_focus' && !grouped.inFocus) {
+            grouped.inFocus = task;
+            return;
+        }
+
         const time = task.payload?.scheduled_time?.trim();
         if (!time) {
             grouped.unplanned.push(task);
@@ -186,7 +289,6 @@ const groupTasks = (tasks: TaskModel[]) => {
 
         const lowerTime = time.toLowerCase();
         let dayLabel = "Today";
-        let weekLabel = "Weekly Intention";
 
         if (lowerTime.includes("tomorrow")) {
             dayLabel = "Tomorrow";
@@ -208,13 +310,9 @@ const groupTasks = (tasks: TaskModel[]) => {
             const d = new Date(time);
             if (!isNaN(d.getTime())) {
                 dayLabel = d.toLocaleDateString('en-US', { weekday: 'long' });
-                const now = new Date();
-                const diff = d.getTime() - now.getTime();
-                weekLabel = diff > 7 * 24 * 60 * 60 * 1000 ? "Future Scope" : "This Week";
             }
         }
 
-        grouped.week = weekLabel;
         if (!grouped.days[dayLabel]) grouped.days[dayLabel] = [];
         grouped.days[dayLabel].push(task);
     });
@@ -241,77 +339,128 @@ const groupTasks = (tasks: TaskModel[]) => {
 };
 
 const TicketCard = ({ task }: { task: TaskModel }) => {
-    const { updateTask } = useSync();
+    const { updateTask, deleteTask } = useSync();
+    const [isExpanded, setIsExpanded] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
+    
     const payload = task.payload || {};
     const isCompleted = payload.completed === true;
     const title = payload.title || 'Untitled';
     const type = task.type || 'TASK';
-    const typeLower = type.toLowerCase();
+    const status = task.status || 'idle';
+    const isInFocus = status === 'in_focus';
     
-    const theme = typeLower === 'habit' ? THEMES.habit : typeLower === 'event' ? THEMES.event : THEMES.default;
+    // Auto-expand if in focus
+    const showExpanded = isExpanded || isInFocus;
+    
+    const theme = type === 'HABIT' ? THEMES.habit : type === 'EVENT' ? THEMES.event : THEMES.default;
 
-    const handleToggle = (e: React.MouseEvent) => {
+    const handleToggleComplete = (e: React.MouseEvent) => {
         e.stopPropagation();
         updateTask(task.id, { ...payload, completed: !isCompleted });
     };
 
+    const onDragEnd = (_: any, info: any) => {
+        if (info.offset.x < -100) {
+            // Delete on swipe left
+            setIsDeleting(true);
+            setTimeout(() => deleteTask(task.id), 200);
+        } else if (info.offset.x > 100) {
+            // Complete on swipe right
+            updateTask(task.id, { ...payload, completed: !isCompleted });
+        }
+    };
+
     return (
-        <div onClick={handleToggle} className="cursor-default animate-[slideUp_0.3s_ease-out]">
-            <PhysicalWrapper 
-                outerClass="mb-0" 
-                innerClass="p-4 flex items-start gap-4" 
-                checked={isCompleted} 
-                shaderColors={theme}
-            >
-                <div className="flex-1 min-w-0">
-                    <h3 className={cn(
-                        "font-medium text-[16px] tracking-wide text-[#d1d1d1] truncate transition-colors duration-300",
-                        isCompleted && "line-through text-[#555]"
-                    )}>
-                        {title}
-                    </h3>
-                    <div className="flex flex-wrap items-center gap-2 mt-2">
-                        <Tag text={type.replace('_', ' ')} type={typeLower} cardTheme={theme} />
-                        {payload.scheduled_time && <Tag text={payload.scheduled_time} type="info" cardTheme={theme} />}
-                        {payload.recurrence && <Tag text={payload.recurrence} type="info" italic={true} cardTheme={theme} />}
-                        {!payload.scheduled_time && task.created_at && (
-                            <Tag text={formatDate(task.created_at)} type="info" cardTheme={theme} />
-                        )}
-                    </div>
+        <motion.div 
+            layout
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ 
+                opacity: isDeleting ? 0 : 1, 
+                x: 0,
+                scale: isDeleting ? 0.95 : 1
+            }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            transition={{ duration: 0.2 }}
+            className="relative group mb-3"
+        >
+            {/* Background Actions */}
+            <div className="absolute inset-0 rounded-[1rem] flex items-center justify-between px-6 overflow-hidden">
+                <div className="flex items-center gap-2 text-emerald-500/30">
+                     <div className="w-1 h-3 bg-emerald-500/20" />
+                     <span className="text-[10px] font-bold uppercase tracking-widest">Complete</span>
                 </div>
-            </PhysicalWrapper>
-        </div>
-    );
-};
+                <div className="flex items-center gap-2 text-red-500/30">
+                     <span className="text-[10px] font-bold uppercase tracking-widest">Delete</span>
+                     <Trash2 size={18} />
+                </div>
+            </div>
 
-const CommuteAlert = ({ message, type, onDismiss }: { message: string, type: string, onDismiss: () => void }) => {
-    const isLiveTrip = type === 'live_trip' || type === 'live_trip_expired';
-    const alertTheme = isLiveTrip ? { c1: [60, 30, 30], c2: [40, 24, 24], c3: [28, 20, 20], c4: [20, 20, 20] } : THEMES.default;
-
-    return (
-        <div className="animate-[alertSlideIn_0.4s_ease-out]">
-            <PhysicalWrapper 
-                outerClass="mb-0" 
-                innerClass="p-4 flex flex-col gap-2 relative" 
-                shaderColors={alertTheme}
-            >
-                <button 
-                    onClick={onDismiss}
-                    className="absolute top-3 right-3 text-[#777] hover:text-white transition-colors z-30"
-                >
-                    <X size={14} />
-                </button>
-                {isLiveTrip && (
-                    <div className="text-[9px] font-bold tracking-widest text-red-500/80 uppercase mb-1 flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                        LIVE TRIP
-                    </div>
+            <motion.div
+                drag="x"
+                dragConstraints={{ left: -120, right: 120 }}
+                dragElastic={0.1}
+                onDragEnd={onDragEnd}
+                onClick={() => setIsExpanded(!isExpanded)}
+                className={cn(
+                    "relative cursor-pointer transition-transform duration-500",
+                    isInFocus && !isExpanded && "scale-[1.01]"
                 )}
-                <div className="text-[14px] text-[#d1d1d1] leading-relaxed italic opacity-90">
-                    {message}
-                </div>
-            </PhysicalWrapper>
-        </div>
+            >
+                <PhysicalWrapper 
+                    outerClass={cn(
+                        "transition-all duration-500", 
+                        showExpanded && "rounded-[1.25rem] bg-[#1a1a1a]"
+                    )}
+                    innerClass={cn(
+                        "p-4 flex flex-col items-stretch", 
+                        showExpanded ? "min-h-[100px]" : "flex-row items-center gap-4 py-3"
+                    )} 
+                    checked={isCompleted} 
+                    shaderColors={theme}
+                >
+                    <div className="flex flex-col w-full">
+                        <div className="min-w-0">
+                            <h3 className={cn(
+                                "font-medium tracking-wide text-[#d1d1d1] truncate transition-all duration-300",
+                                isCompleted && "line-through text-[#555]",
+                                showExpanded ? "text-[18px] text-white" : "text-[15px]"
+                            )}>
+                                {title}
+                            </h3>
+                        </div>
+                        
+                        <div className="flex flex-wrap items-center gap-2 mt-2 opacity-80">
+                            <Tag text={type} type={type.toLowerCase()} cardTheme={theme} glow={isInFocus} />
+                            {payload.scheduled_time && <Tag text={payload.scheduled_time} type="info" cardTheme={theme} />}
+                            {payload.recurrence && <Tag text={payload.recurrence} type="info" italic={true} cardTheme={theme} />}
+                        </div>
+                    </div>
+
+                    <AnimatePresence>
+                        {showExpanded && (
+                            <motion.div 
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: "auto", opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                transition={{ duration: 0.3, ease: "easeOut" }}
+                                className="overflow-hidden"
+                            >
+                                <div className="pt-2">
+                                    {type === 'COMMUTE' && <CommuteSteps directions={payload.directions} />}
+                                    {type === 'COUNTDOWN' && <CountdownTimer expiresAt={payload.expires_at} />}
+                                    {payload.note && (
+                                        <div className="mt-4 text-[13px] text-white/60 leading-relaxed font-light italic border-l-2 border-white/5 pl-4 ml-1">
+                                            "{payload.note}"
+                                        </div>
+                                    )}
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
+                </PhysicalWrapper>
+            </motion.div>
+        </motion.div>
     );
 };
 // --- Main App Component ---
@@ -321,16 +470,14 @@ function App() {
     const [inputValue, setInputValue] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
     const [placeholder, setPlaceholder] = useState("Tell AI to manage your stack...");
-    const [alerts, setAlerts] = useState<any[]>([]);
     const [feedback, setFeedback] = useState<string | null>(null);
-    const [integrations, setIntegrations] = useState<string[]>([]); // No integrations by default
+    const [integrations, setIntegrations] = useState<string[]>([]);
 
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const tauriWindow = useRef(getCurrentWindow());
 
     const minimizeWindow = (e?: React.MouseEvent) => {
         if (e) e.stopPropagation();
-        console.log("Minimizing window...");
         tauriWindow.current.minimize().catch(err => {
             console.error("Failed to minimize window:", err);
         });
@@ -365,26 +512,16 @@ function App() {
             const resp = await fetch('http://localhost:8000/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: message, userid: 1 }) // Hardcoded user 1 for now
+                body: JSON.stringify({ message: message, userid: 1 })
             });
-            const data = await resp.json();
 
             if (resp.ok) {
+                const data = await resp.json();
                 await syncNow();
-                if (data.action === 'clear') {
-                    setAlerts([]);
-                }
-
-                const isDirections = data.action === 'get_directions' || data.action === 'start_live_directions';
-                if (data.response && isDirections) {
-                    setAlerts(prev => [{
-                        message: data.response,
-                        type: data.action === 'start_live_directions' ? 'live_trip' : 'directions',
-                        id: Date.now()
-                    }, ...prev]);
-                } else if (data.response) {
+                
+                if (data.response) {
                     showFeedback(data.response);
-                } else if (data.action && data.action !== 'message') {
+                } else {
                     setPlaceholder("Action completed.");
                     setTimeout(() => setPlaceholder("Tell AI to manage your stack..."), 3000);
                 }
@@ -489,17 +626,6 @@ function App() {
             {/* Scrollable Content */}
             <section className="stack-container flex-1 overflow-y-auto no-scrollbar pb-4 flex flex-col relative z-10">
                 <div className="px-6 pt-4 flex flex-col">
-                    <div className="commute-alerts-container flex flex-col gap-2.5 mb-6">
-                        {alerts.map(alert => (
-                            <CommuteAlert 
-                                key={alert.id}
-                                message={alert.message}
-                                type={alert.type}
-                                onDismiss={() => setAlerts(prev => prev.filter(a => a.id !== alert.id))}
-                            />
-                        ))}
-                    </div>
-
                     <div className="scope-root flex flex-col pt-2">
                         {tasks.length === 0 ? (
                             <div className="text-[var(--text-secondary)] text-center py-5 text-[13px]">
@@ -512,7 +638,19 @@ function App() {
                                 
                                 return (
                                     <>
-                                        {/* 1. Unscheduled Tasks (No Scope) */}
+                                        {/* 1. In Focus Ticket */}
+                                        {grouped.inFocus && (
+                                            <div className="mb-8">
+                                                <div className="pl-[2.5px] mb-2 flex items-center h-4">
+                                                    <span className="text-[10px] font-bold uppercase tracking-[1.5px] text-[#3B82F6]">
+                                                        Now in Focus
+                                                    </span>
+                                                </div>
+                                                <TicketCard task={grouped.inFocus} />
+                                            </div>
+                                        )}
+
+                                        {/* 2. Unscheduled Tasks (No Scope) */}
                                         {grouped.unplanned.length > 0 && (
                                             <div className={cn(
                                                 "task-list flex flex-col gap-4 px-4 pb-8",
@@ -522,9 +660,9 @@ function App() {
                                             </div>
                                         )}
 
-                                        {/* 2. Hierarchical Scopes (Scheduled) */}
+                                        {/* 3. Hierarchical Scopes (Scheduled) */}
                                         {dayKeys.length > 0 && (
-                                            <ScopeBlock label={grouped.week || "Scope"} type="week">
+                                            <ScopeBlock label="Timeline" type="week">
                                                 {dayKeys.map(dayLabel => (
                                                     <ScopeBlock key={dayLabel} label={dayLabel} type="day">
                                                         <div className="task-list flex flex-col gap-4">

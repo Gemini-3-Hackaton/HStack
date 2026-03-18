@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, createContext, ReactNode, useContext, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 
-export type TicketType = 'HABIT' | 'EVENT' | 'TASK' | 'COMMUTE' | 'AGENT_TASK' | 'COUNTDOWN';
+export type TicketType = 'HABIT' | 'EVENT' | 'TASK' | 'COMMUTE' | 'COUNTDOWN';
+export type TicketStatus = 'idle' | 'in_focus' | 'completed' | 'expired';
 
 export interface TaskModel {
   id: string;
   type: TicketType;
+  status: TicketStatus;
   payload: any;
   created_at?: string;
   updated_at?: string;
@@ -18,6 +20,7 @@ export interface SyncAction {
   type: SyncActionType;
   entity_id: string;
   entity_type: string;
+  status?: TicketStatus;
   payload?: any;
   timestamp: string;
 }
@@ -25,8 +28,9 @@ export interface SyncAction {
 interface SyncContextType {
   tasks: TaskModel[];
   isConnected: boolean;
-  createTask: (type: TicketType, payload: any) => Promise<string>;
+  createTask: (type: TicketType, payload: any, status?: TicketStatus) => Promise<string>;
   updateTask: (id: string, payload: any) => Promise<void>;
+  updateTaskStatus: (id: string, status: TicketStatus) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
   syncNow: () => Promise<void>;
 }
@@ -46,10 +50,10 @@ async function calculateClientStateHash(tasks: TaskModel[]): Promise<string> {
   const stateList = tasks.map(t => ({
       id: t.id,
       type: t.type,
-      payload: t.payload
+      payload: t.payload,
+      status: t.status
   }));
   stateList.sort((a, b) => {
-      // Very rough approximate sort matching pg (if needed exact, usually id will suffice)
       if (a.id < b.id) return -1;
       if (a.id > b.id) return 1;
       return 0;
@@ -184,12 +188,24 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
     };
     
     // Optimistic Update
-    let newTasks = [...tasks];
+    let newTasks = tasks.map(t => {
+        if (t.id === action.entity_id) {
+            // Clone the task and update only provided fields
+            const updatedTask = { ...t };
+            if (action.payload !== undefined) updatedTask.payload = action.payload;
+            if (action.status !== undefined) updatedTask.status = action.status;
+            return updatedTask as TaskModel;
+        }
+        return t;
+    });
+
     if (action.type === 'CREATE') {
-        newTasks.push({ id: action.entity_id, type: action.entity_type as TicketType, payload: action.payload });
-    } else if (action.type === 'UPDATE') {
-        const idx = newTasks.findIndex(t => t.id === action.entity_id);
-        if (idx > -1) newTasks[idx].payload = action.payload;
+        newTasks.push({ 
+            id: action.entity_id, 
+            type: action.entity_type as TicketType, 
+            payload: action.payload,
+            status: action.status || 'idle'
+        });
     } else if (action.type === 'DELETE') {
         newTasks = newTasks.filter(t => t.id !== action.entity_id);
     }
@@ -206,14 +222,18 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
     }
   };
 
-  const createTask = async (type: TicketType, payload: any) => {
+  const createTask = async (type: TicketType, payload: any, status: TicketStatus = 'idle') => {
       const entity_id = uuidv4();
-      await pushAction({ type: 'CREATE', entity_id, entity_type: type, payload });
+      await pushAction({ type: 'CREATE', entity_id, entity_type: type, payload, status });
       return entity_id;
   };
 
   const updateTask = async (id: string, payload: any) => {
       await pushAction({ type: 'UPDATE', entity_id: id, entity_type: 'TASK', payload });
+  };
+
+  const updateTaskStatus = async (id: string, status: TicketStatus) => {
+      await pushAction({ type: 'UPDATE', entity_id: id, entity_type: 'TASK', status });
   };
 
   const deleteTask = async (id: string) => {
@@ -222,7 +242,7 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
 
 
   return (
-    <SyncContext.Provider value={{ tasks, isConnected, createTask, updateTask, deleteTask, syncNow: fetchFullState }}>
+    <SyncContext.Provider value={{ tasks, isConnected, createTask, updateTask, updateTaskStatus, deleteTask, syncNow: fetchFullState }}>
       {children}
     </SyncContext.Provider>
   );

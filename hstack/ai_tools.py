@@ -1,4 +1,6 @@
-from typing import Any
+from typing import TYPE_CHECKING, cast
+if TYPE_CHECKING:
+    pass
 import os
 import httpx
 from google import genai
@@ -14,8 +16,17 @@ DIRECTIONS_SERVICE_URL = os.getenv("DIRECTIONS_SERVICE_URL", "http://localhost:8
 
 
 # --------------- Directions helper ---------------
-async def call_directions_service(origin: str, destination: str) -> dict[str, Any]:
-    """Call the directions microservice and return parsed transit info."""
+async def call_directions_service(origin: str, destination: str) -> dict[str, object]:
+    """
+    Call the directions microservice and return parsed transit info.
+    
+    Args:
+        origin: Starting address
+        destination: Destination address
+        
+    Returns:
+        JSON response from the directions service
+    """
     origin = origin.strip()
     destination = destination.strip()
     if not origin or not destination:
@@ -27,64 +38,84 @@ async def call_directions_service(origin: str, destination: str) -> dict[str, An
                 f"{DIRECTIONS_SERVICE_URL}/directions",
                 json={"origin": origin, "destination": destination},
             )
-        except httpx.TimeoutException as exc:
-            raise RuntimeError("Directions service timed out.") from exc
-        except httpx.HTTPError as exc:
-            raise RuntimeError(
-                f"Directions service is unreachable at {DIRECTIONS_SERVICE_URL}."
-            ) from exc
+        except (httpx.ConnectError, httpx.HTTPError, httpx.TimeoutException) as exc:
+            print(f"Directions service error: {exc}")
+            raise RuntimeError(f"Directions service at {DIRECTIONS_SERVICE_URL} is currently unreachable.") from exc
 
     if resp.is_error:
-        detail = None
+        detail: str | None = None
         try:
-            payload = resp.json()
+            payload: dict[str, object] = resp.json()
         except ValueError:
-            payload = None
+            payload = {}
+            
         if isinstance(payload, dict):
-            detail = payload.get("detail")
+            detail = str(payload.get("detail", ""))
         raise RuntimeError(detail or f"Directions service returned HTTP {resp.status_code}.")
 
     return resp.json()
 
 
-def parse_transit_directions(raw_routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Parse raw Google Maps directions response into a clean list of route summaries."""
-    parsed = []
+def parse_transit_directions(raw_routes: list[dict[str, object]]) -> list[dict[str, object]]:
+    """
+    Parse raw Google Maps directions response into a clean list of route summaries.
+    
+    Args:
+        raw_routes: List of raw route dictionaries from Google Maps API
+        
+    Returns:
+        List of parsed route summaries
+    """
+    parsed: list[dict[str, object]] = []
     for route in raw_routes:
-        leg = route.get("legs", [{}])[0]
-        steps_info = []
-        for step in leg.get("steps", []):
-            travel_mode = step.get("travel_mode", "")
-            info = {
+        legs = cast(list[dict[str, object]], route.get("legs", [{}]))
+        leg = legs[0] if legs else {}
+        
+        steps_info: list[dict[str, object]] = []
+        steps = cast(list[dict[str, object]], leg.get("steps", []))
+        
+        for step in steps:
+            travel_mode = str(step.get("travel_mode", ""))
+            duration_dict = cast(dict[str, object], step.get("duration", {}))
+            info: dict[str, object] = {
                 "travel_mode": travel_mode,
-                "duration": step.get("duration", {}).get("text", ""),
+                "duration": duration_dict.get("text", ""),
                 "instruction": step.get("html_instructions", ""),
             }
-            transit = step.get("transit_details")
+            transit = cast(dict[str, object], step.get("transit_details", {}))
             if transit:
-                line = transit.get("line", {})
+                line = cast(dict[str, object], transit.get("line", {}))
                 info["transit_line"] = line.get("short_name") or line.get("name", "")
-                info["vehicle_type"] = line.get("vehicle", {}).get("type", "")
-                info["departure_stop"] = transit.get("departure_stop", {}).get("name", "")
-                info["arrival_stop"] = transit.get("arrival_stop", {}).get("name", "")
-                dep_time = transit.get("departure_time", {})
-                arr_time = transit.get("arrival_time", {})
+                vehicle = cast(dict[str, object], line.get("vehicle", {}))
+                info["vehicle_type"] = vehicle.get("type", "")
+                dep_stop = cast(dict[str, object], transit.get("departure_stop", {}))
+                arr_stop = cast(dict[str, object], transit.get("arrival_stop", {}))
+                info["departure_stop"] = dep_stop.get("name", "")
+                info["arrival_stop"] = arr_stop.get("name", "")
+                dep_time = cast(dict[str, object], transit.get("departure_time", {}))
+                arr_time = cast(dict[str, object], transit.get("arrival_time", {}))
                 info["departure_time"] = dep_time.get("text", "")
                 info["departure_timestamp"] = dep_time.get("value")
                 info["arrival_time"] = arr_time.get("text", "")
                 info["num_stops"] = transit.get("num_stops", 0)
             steps_info.append(info)
 
+        leg_dur = cast(dict[str, object], leg.get("duration", {}))
+        leg_dep = cast(dict[str, object], leg.get("departure_time", {}))
+        leg_arr = cast(dict[str, object], leg.get("arrival_time", {}))
         parsed.append({
             "summary": route.get("summary", ""),
-            "total_duration": leg.get("duration", {}).get("text", ""),
-            "total_duration_sec": leg.get("duration", {}).get("value", 0),
-            "departure_time": leg.get("departure_time", {}).get("text", ""),
-            "arrival_time": leg.get("arrival_time", {}).get("text", ""),
+            "total_duration": leg_dur.get("text", ""),
+            "total_duration_sec": leg_dur.get("value", 0),
+            "departure_time": leg_dep.get("text", ""),
+            "arrival_time": leg_arr.get("text", ""),
             "steps": steps_info,
         })
     # Sort by total duration
-    parsed.sort(key=lambda r: r["total_duration_sec"])
+    def _sort_key(r: dict[str, object]) -> int:
+        val = r.get("total_duration_sec", 0)
+        return int(val) if isinstance(val, (int, float, str)) else 0
+    parsed.sort(key=_sort_key)
     return parsed
 
 # Defines the function schemas to pass to the model
@@ -214,7 +245,7 @@ add_commute_function_schema = {
 
 get_directions_function_schema = {
     "name": "get_directions",
-    "description": "Get real-time transit directions between two places right now. Use this when the user asks how to get from A to B, or wants to know the fastest route.",
+    "description": "Get real-time transit directions between two places. This creates a persistent COMMUTE ticket in the user's stack that renders expanded (in-focus) with step-by-step instructions.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -248,13 +279,8 @@ remove_commute_function_schema = {
 
 start_live_directions_function_schema = {
     "name": "start_live_directions",
-    "description": """Start a live directions tracker when the user has an URGENT or ONE-TIME trip with a deadline.
-Use this when the user says things like:
-- 'I need to get to X in 30 minutes'
-- 'I am at X and I need to be at Y by 17:00'
-- 'I'm currently at X, I need to go to Y in 20 mins'
-This will immediately fetch directions AND keep updating every 5 minutes with fresh transit info until the deadline passes.
-Do NOT use add_commute for this – add_commute is for recurring/daily commutes only.""",
+    "description": """Start a live directions tracker for an URGENT or ONE-TIME trip with a deadline.
+This creates a persistent COMMUTE ticket with `live: true` that stays in-focus and updates every 5 minutes until the deadline passes.""",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -275,52 +301,20 @@ Do NOT use add_commute for this – add_commute is for recurring/daily commutes 
     }
 }
 
-create_agent_task_function_schema = {
-    "name": "create_agent_task",
-    "description": """Create a timed background agent task. Use this when the user mentions an AI agent, IDE, or automated tool doing work in the background.
-Examples:
-- 'VSCode is working on refactoring my code'
-- 'Cursor is fixing the tests'
-- 'Copilot is generating the migration'
-- 'The AI is analyzing the codebase'
-- 'Claude is reviewing the PR'
-This creates a AGENT_TASK ticket with a 10-minute countdown timer. The ticket auto-deletes when the timer expires.""",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "title": {
-                "type": "STRING",
-                "description": "A short description of what the agent is doing, e.g. 'VSCode refactoring auth module'"
-            },
-            "duration_minutes": {
-                "type": "INTEGER",
-                "description": "How many minutes the timer should run. Default is 10."
-            }
-        },
-        "required": ["title"]
-    }
-}
-
 create_countdown_function_schema = {
     "name": "create_countdown",
-    "description": """Create a personal countdown timer. Use this when the user says they need to do something within a certain time.
-Examples:
-- 'I need to eat in 30 minutes'
-- 'I have to leave in 15 min'
-- 'Remind me to call mum in 1 hour'
-- 'I should start cooking in 20 minutes'
-- 'I have a meeting in 45 min'
+    "description": """Create a countdown timer (personal or agent-related). Use this for any task with a time limit (e.g., 'eat in 30 mins', 'IDE refactoring for 10 mins').
 This creates a COUNTDOWN ticket with a live timer that auto-deletes when it expires.""",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "title": {
                 "type": "STRING",
-                "description": "A short description of what the user needs to do, e.g. 'Time to eat'"
+                "description": "A short description of the task or timer, e.g., 'Refactoring code' or 'Time to leave'"
             },
             "duration_minutes": {
                 "type": "INTEGER",
-                "description": "Number of minutes until the deadline. Extract from phrases like 'in 30 min', 'in 1 hour' (=60), etc."
+                "description": "Number of minutes until the deadline."
             }
         },
         "required": ["title", "duration_minutes"]
@@ -338,7 +332,6 @@ chat_tools = [
          get_directions_function_schema,
          remove_commute_function_schema,
          start_live_directions_function_schema,
-         create_agent_task_function_schema,
          create_countdown_function_schema,
      ]}
 ]

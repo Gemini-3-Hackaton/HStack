@@ -1,4 +1,6 @@
-from typing import Any
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    pass
 from pydantic import BaseModel
 from datetime import datetime
 from uuid import UUID
@@ -9,13 +11,19 @@ class TicketType(str, Enum):
     EVENT = "EVENT"
     TASK = "TASK"
     COMMUTE = "COMMUTE"
-    AGENT_TASK = "AGENT_TASK"
     COUNTDOWN = "COUNTDOWN"
+
+class TicketStatus(str, Enum):
+    IDLE = "idle"
+    IN_FOCUS = "in_focus"
+    COMPLETED = "completed"
+    EXPIRED = "expired"
 
 class TaskBase(BaseModel):
     userid: int | None = None
     type: TicketType = TicketType.TASK
-    payload: dict[str, Any] | None = None
+    status: TicketStatus = TicketStatus.IDLE
+    payload: dict[str, object] | None = None
 
 class TaskCreate(TaskBase):
     pass
@@ -57,7 +65,7 @@ class SyncAction(BaseModel):
     type: SyncActionType
     entity_id: UUID
     entity_type: str = "TASK"
-    payload: dict[str, Any] | None = None
+    payload: dict[str, object] | None = None
     timestamp: datetime
 
 class SyncHandshake(BaseModel):

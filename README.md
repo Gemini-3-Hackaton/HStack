@@ -128,7 +128,7 @@ DIRECTIONS_SERVICE_URL=http://localhost:8001   # optional, this is the default
 **1. Start the Backend Server:**
 
 ```bash
-uv run uvicorn hstack.main:app --port 8000 --reload
+npx varlock run -- uv run uvicorn hstack.main:app --port 8000
 ```
 
 **2. Start the Tauri Desktop App:**
