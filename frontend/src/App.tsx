@@ -8,6 +8,7 @@ import { twMerge } from "tailwind-merge";
 import { WebGLGrain } from "./components/WebGLGrain";
 import { motion, AnimatePresence } from "framer-motion";
 import { Settings } from "./components/Settings";
+import { SetupWizard } from "./components/SetupWizard";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -591,6 +592,7 @@ function App() {
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
     const [isHistoryExpanded, setIsHistoryExpanded] = useState(false);
     const [interactionState, setInteractionState] = useState<InteractionState>('IDLE');
+    const [showSetup, setShowSetup] = useState(false);
 
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const tauriWindow = useRef(getCurrentWindow());
@@ -598,6 +600,13 @@ function App() {
 
     const minimizeWindow = (e?: React.MouseEvent) => { if (e) e.stopPropagation(); tauriWindow.current.minimize().catch(err => console.error(err)); };
     useEffect(() => { 
+        const checkOnboarding = async () => {
+            const settings = await invoke<any>('get_settings');
+            if (!settings.onboarding_complete) {
+              setShowSetup(true);
+            }
+        };
+        checkOnboarding();
         syncNow();
         // Load user locale settings on app start
         loadUserLocale().catch(err => console.warn("Failed to load user locale:", err));
@@ -632,6 +641,7 @@ function App() {
     return (
         <main className="app-container w-screen h-screen flex flex-col relative bg-[#080808] rounded-[24px] overflow-hidden border border-white/15 shadow-2xl transition-all duration-300 ease-out">
             <WebGLGrain colors={{ c1: [30, 30, 30], c2: [12, 12, 12], c3: [9, 9, 9], c4: [6, 6, 6] }} spreadX={0.35} spreadY={1.1} contrast={2.0} noiseFactor={0.7} opacity={1.0} />
+            {showSetup && <SetupWizard onComplete={() => setShowSetup(false)} />}
             <header onPointerDown={(e) => { if (e.button === 0) { tauriWindow.current.startDragging().catch(console.error); } }} className="user-header pt-[80px] pb-[16px] px-6 shrink-0 relative bg-transparent cursor-default select-none z-10">
                 <div className="absolute top-[22px] left-[22px] right-[22px] h-9 flex items-center justify-between pointer-events-none">
                     <button onClick={minimizeWindow} className="w-9 h-9 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all pointer-events-auto bg-white/5 rounded-full hover:bg-white/10"><ChevronDown size={20} /></button>

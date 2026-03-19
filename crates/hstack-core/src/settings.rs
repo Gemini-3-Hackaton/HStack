@@ -11,6 +11,14 @@ pub struct SavedProvider {
     pub rate_limit: Option<RateLimitConfig>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum SyncMode {
+    #[default]
+    LocalOnly,
+    CloudOfficial,
+    CloudCustom,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserSettings {
     pub providers: Vec<SavedProvider>,
@@ -18,6 +26,9 @@ pub struct UserSettings {
     pub local_processing: bool,
     pub locale: Option<String>,
     pub hour12: Option<bool>,
+    pub sync_mode: SyncMode,
+    pub custom_server_url: Option<String>,
+    pub onboarding_complete: bool,
 }
 
 impl UserSettings {

@@ -103,9 +103,11 @@ pub async fn chat_loop(
                                 }
                                 start_idx = content_start + end + 3;
                             } else {
+                                // If we don't find a closing ```, stop to prevent infinite loops
                                 break;
                             }
                         } else {
+                            // If we don't find a newline after ```, stop
                             break;
                         }
                     }
@@ -114,9 +116,11 @@ pub async fn chat_loop(
                     if tool_calls.is_empty() {
                         if let Some(start) = content.find('{') {
                             if let Some(end) = content.rfind('}') {
-                                let json_str = &content[start..end + 1];
-                                if let Ok(json_val) = serde_json::from_str::<Value>(json_str) {
-                                    extract_tool_calls_from_json(&json_val, &mut tool_calls);
+                                if end > start {
+                                    let json_str = &content[start..end + 1];
+                                    if let Ok(json_val) = serde_json::from_str::<Value>(json_str) {
+                                        extract_tool_calls_from_json(&json_val, &mut tool_calls);
+                                    }
                                 }
                             }
                         }

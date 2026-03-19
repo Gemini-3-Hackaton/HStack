@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use crate::ticket::{Ticket, TicketType, TicketStatus};
+use crate::ticket::{Ticket, TicketType, TicketStatus, TicketPayload};
 use crate::error::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -21,7 +21,7 @@ pub struct SyncAction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<TicketStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub payload: Option<Value>,
+    pub payload: Option<TicketPayload>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub timestamp: String,
@@ -31,7 +31,7 @@ pub struct SyncAction {
 struct HashStateItem {
     id: String,
     r#type: TicketType,
-    payload: Value,
+    payload: TicketPayload,
     status: TicketStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     notes: Option<String>,
@@ -56,16 +56,20 @@ pub fn reconcile_state(base_tickets: &[Ticket], pending_actions: Vec<SyncAction>
                         Some(t) => {
                             // Check if the base state matches the intended update
                             let status_matches = action.status.as_ref().map_or(true, |s| s == &t.status);
-                            let notes_matches = action.notes.as_ref().map_or(true, |n| Some(n) == t.notes.as_ref());
+                            let notes_matches = action.notes.as_ref().map_or(true, |n| {
+                                let norm_action = if n.is_empty() { None } else { Some(n.clone()) };
+                                let norm_base = t.notes.as_ref().filter(|s| !s.is_empty()).cloned();
+                                norm_action == norm_base
+                            });
                             
                             let payload_matches = action.payload.as_ref().map_or(true, |p| {
-                                // If action payload is an object, check if all its keys are present and equal in base
-                                if let (Some(action_obj), Some(base_obj)) = (p.as_object(), t.payload.as_object()) {
-                                    action_obj.iter().all(|(k, v)| base_obj.get(k) == Some(v))
-                                } else {
-                                    // Otherwise do direct equality check
-                                    p == &t.payload
-                                }
+                                // Since payload is fully typed, we just check equality.
+                                // For merging (Update), we actually merge and then check equality
+                                // of the relevant merged fields, but for now we expect the action's
+                                // payload to be exactly what is requested (which may be a partial Generic 
+                                // update, but that's handled gracefully if we fall back to generic eq).
+                                // But if it's strongly typed, equality implies the update has fully propagated.
+                                p == &t.payload
                             });
 
                             // Keep the action if either status or payload or notes doesn't match yet
@@ -89,25 +93,25 @@ pub fn project_state(base_tickets: Vec<Ticket>, actions: &[SyncAction]) -> Vec<T
     for action in actions {
         match action.r#type {
             SyncActionType::Create => {
+                let type_ = match action.entity_type.to_lowercase().as_str() {
+                    "habit" => TicketType::Habit,
+                    "event" => TicketType::Event,
+                    "commute" => TicketType::Commute,
+                    "countdown" => TicketType::Countdown,
+                    _ => TicketType::Task,
+                };
+                let payload = action.payload.clone().unwrap_or(TicketPayload::Generic(serde_json::json!({})));
+                let title = payload.get_title().to_string();
+
                 let ticket = Ticket {
                     id: action.entity_id.clone(),
-                    r#type: match action.entity_type.to_lowercase().as_str() {
-                        "habit" => TicketType::Habit,
-                        "event" => TicketType::Event,
-                        "commute" => TicketType::Commute,
-                        "countdown" => TicketType::Countdown,
-                        _ => TicketType::Task,
-                    },
+                    r#type: type_,
                     status: action.status.clone().unwrap_or(TicketStatus::Idle),
-                    payload: action.payload.clone().unwrap_or(Value::Null),
+                    payload,
                     notes: action.notes.clone(),
                     created_at: chrono::Utc::now(),
                     updated_at: chrono::Utc::now(),
-                    title: action.payload.as_ref()
-                        .and_then(|p| p.get("title"))
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("Untitled")
-                        .to_string(),
+                    title,
                 };
                 effective_state.push(ticket);
             }
@@ -129,19 +133,20 @@ pub fn project_state(base_tickets: Vec<Ticket>, actions: &[SyncAction]) -> Vec<T
                         ticket.notes = Some(notes.clone());
                     }
                     if let Some(new_payload) = &action.payload {
-                        if let (Some(obj), Some(new_obj)) = (ticket.payload.as_object_mut(), new_payload.as_object()) {
-                            for (k, v) in new_obj {
-                                obj.insert(k.clone(), v.clone());
+                        match (&mut ticket.payload, new_payload) {
+                            (TicketPayload::Generic(obj), TicketPayload::Generic(new_obj)) => {
+                                if let (Some(o), Some(n)) = (obj.as_object_mut(), new_obj.as_object()) {
+                                    for (k, v) in n {
+                                        o.insert(k.clone(), v.clone());
+                                    }
+                                }
                             }
-                            if let Some(t) = new_obj.get("title").and_then(|v| v.as_str()) {
-                                ticket.title = t.to_string();
-                            }
-                        } else {
-                            ticket.payload = new_payload.clone();
-                            if let Some(t) = new_payload.get("title").and_then(|v| v.as_str()) {
-                                ticket.title = t.to_string();
+                            // Otherwise replace whole payload for simplicity
+                            (_, p) => {
+                                ticket.payload = p.clone();
                             }
                         }
+                        ticket.title = ticket.payload.get_title().to_string();
                     }
                     ticket.updated_at = chrono::Utc::now();
                 }
@@ -186,4 +191,69 @@ pub fn calculate_state_hash(tasks: &[Ticket]) -> Result<String, Error> {
 
     // 5. Hex encode
     Ok(format!("{:x}", result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ticket::{TicketType, TicketStatus, TicketPayload};
+
+    #[test]
+    fn test_reconcile_create() {
+        let base_tickets = vec![];
+        let pending = vec![SyncAction {
+            action_id: "a1".to_string(),
+            r#type: SyncActionType::Create,
+            entity_id: "t1".to_string(),
+            entity_type: "TASK".to_string(),
+            status: Some(TicketStatus::Idle),
+            payload: Some(TicketPayload::Task {
+                title: "Test".to_string(),
+                scheduled_time_iso: None,
+                rrule: None,
+                duration_minutes: None,
+                completed: Some(false),
+            }),
+            notes: None,
+            timestamp: "now".to_string(),
+        }];
+
+        let reconciled = reconcile_state(&base_tickets, pending);
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].entity_id, "t1");
+    }
+
+    #[test]
+    fn test_reconcile_already_created() {
+        let payload = TicketPayload::Task {
+            title: "Test".to_string(),
+            scheduled_time_iso: None,
+            rrule: None,
+            duration_minutes: None,
+            completed: Some(false),
+        };
+        let base_tickets = vec![Ticket {
+            id: "t1".to_string(),
+            title: "Test".to_string(),
+            r#type: TicketType::Task,
+            status: TicketStatus::Idle,
+            payload: payload.clone(),
+            notes: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+        let pending = vec![SyncAction {
+            action_id: "a1".to_string(),
+            r#type: SyncActionType::Create,
+            entity_id: "t1".to_string(),
+            entity_type: "TASK".to_string(),
+            status: Some(TicketStatus::Idle),
+            payload: Some(payload),
+            notes: None,
+            timestamp: "now".to_string(),
+        }];
+
+        let reconciled = reconcile_state(&base_tickets, pending);
+        assert_eq!(reconciled.len(), 0);
+    }
 }

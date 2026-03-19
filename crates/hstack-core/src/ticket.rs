@@ -23,20 +23,91 @@ pub enum TicketStatus {
     Expired,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum TicketPayload {
+    Commute {
+        title: String,
+        label: Option<String>,
+        origin: String,
+        destination: String,
+        deadline: Option<String>,
+        days: Option<String>,
+        live: Option<bool>,
+        minutes_remaining: Option<i64>,
+        directions: Option<Value>,
+        completed: Option<bool>,
+    },
+    Countdown {
+        title: String,
+        duration_minutes: i64,
+        expires_at: Option<String>,
+    },
+    Event {
+        title: String,
+        scheduled_time_iso: Option<String>,
+        rrule: Option<String>,
+        duration_minutes: Option<i64>,
+        completed: Option<bool>,
+    },
+    Habit {
+        title: String,
+        scheduled_time_iso: Option<String>,
+        rrule: Option<String>,
+        completed: Option<bool>,
+    },
+    Task {
+        title: String,
+        scheduled_time_iso: Option<String>,
+        rrule: Option<String>,
+        duration_minutes: Option<i64>,
+        completed: Option<bool>,
+    },
+    Generic(Value), // Fallback for unknown payloads during migration
+}
+
+impl TicketPayload {
+    pub fn get_title(&self) -> &str {
+        match self {
+            TicketPayload::Commute { title, .. } => title,
+            TicketPayload::Countdown { title, .. } => title,
+            TicketPayload::Event { title, .. } => title,
+            TicketPayload::Habit { title, .. } => title,
+            TicketPayload::Task { title, .. } => title,
+            TicketPayload::Generic(v) => v.get("title").and_then(|t| t.as_str()).unwrap_or("Untitled"),
+        }
+    }
+
+    pub fn set_title(&mut self, new_title: String) {
+        match self {
+            TicketPayload::Commute { title, .. } => *title = new_title,
+            TicketPayload::Countdown { title, .. } => *title = new_title,
+            TicketPayload::Event { title, .. } => *title = new_title,
+            TicketPayload::Habit { title, .. } => *title = new_title,
+            TicketPayload::Task { title, .. } => *title = new_title,
+            TicketPayload::Generic(v) => {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("title".to_string(), serde_json::Value::String(new_title));
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ticket {
     pub id: String,
     pub title: String,
     pub r#type: TicketType,
     pub status: TicketStatus,
-    pub payload: Value, // Flexible payload for different ticket types
+    pub payload: TicketPayload,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl Ticket {
-    pub fn new(title: String, type_: TicketType, payload: Value, notes: Option<String>) -> Self {
+    pub fn new(title: String, type_: TicketType, payload: TicketPayload, notes: Option<String>) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4().to_string(),

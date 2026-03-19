@@ -5,8 +5,8 @@ use tauri_plugin_store::StoreExt;
 use serde_json::{json, Value};
 use hstack_core::provider::{Message, Role, ProviderConfig};
 use hstack_core::chat::{chat_loop, ToolExecutor, ContextRefreshFn};
-use hstack_core::settings::{UserSettings, SavedProvider};
-use hstack_core::ticket::{tool_schemas, Ticket, TicketStatus};
+use hstack_core::settings::{UserSettings, SavedProvider, SyncMode};
+use hstack_core::ticket::{tool_schemas, Ticket, TicketStatus, TicketPayload};
 use hstack_core::sync::{SyncAction, SyncActionType, project_state, reconcile_state};
 use hstack_core::temporal_parser::parse_agent_rrule;
 use secure_store::SecureStore;
@@ -89,7 +89,7 @@ async fn append_pending_action(
     action_type: SyncActionType,
     entity_id: String,
     entity_type: String,
-    payload: Option<Value>,
+    payload: Option<TicketPayload>,
     status: Option<TicketStatus>,
     notes: Option<String>,
 ) -> Result<(), String> {
@@ -170,8 +170,7 @@ async fn build_system_prompt_with_fresh_context(app: AppHandle) -> Result<String
         .take(5)
         .map(|a| {
             let title = a.payload.as_ref()
-                .and_then(|p| p.get("title"))
-                .and_then(|v| v.as_str())
+                .map(|p| p.get_title())
                 .unwrap_or("Unknown");
             format!("- {:?}: {} ({}) at {}", a.r#type, title, a.entity_type, a.timestamp)
         })
@@ -310,30 +309,20 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
         Box::pin(async move {
             match name.as_str() {
                 "create_ticket" => {
-                    let ticket_type_str = args.get("type").and_then(|v| v.as_str()).unwrap_or("TASK");
+                    let ticket_type_str = args.get("type").and_then(|v| v.as_str()).unwrap_or("TASK").to_uppercase();
                     let notes = args.get("notes").and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let mut payload = serde_json::json!({ "completed": false });
+                    let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled").to_string();
+                    let duration_minutes = args.get("duration_minutes").and_then(|v| v.as_i64());
                     
-                    if let Some(obj) = payload.as_object_mut() {
-                        if let Some(args_obj) = args.as_object() {
-                            for (k, v) in args_obj {
-                                if k != "type" && k != "notes" && k != "rrule" {
-                                    obj.insert(k.clone(), v.clone());
-                                }
-                            }
-                        }
-                    }
+                    let mut scheduled_time_iso = None;
+                    let mut rrule_out = None;
 
                     // Strict parsing for rrule
                     if let Some(rrule_input) = args.get("rrule").and_then(|v| v.as_str()) {
                         match parse_agent_rrule(rrule_input) {
                             Ok((start_datetime, rrule_str)) => {
-                                if let Some(obj) = payload.as_object_mut() {
-                                    obj.insert("scheduled_time_iso".to_string(), json!(start_datetime.to_rfc3339()));
-                                    if let Some(rrule) = rrule_str {
-                                        obj.insert("rrule".to_string(), json!(rrule));
-                                    }
-                                }
+                                scheduled_time_iso = Some(start_datetime.to_rfc3339());
+                                rrule_out = rrule_str;
                             },
                             Err(e) => {
                                 return Ok(format!("⚠️ Tool failed: {}. You must output a valid RFC 5545 string. Try again.", e));
@@ -341,12 +330,35 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         }
                     }
 
+                    let payload = match ticket_type_str.as_str() {
+                        "HABIT" => TicketPayload::Habit {
+                            title,
+                            scheduled_time_iso,
+                            rrule: rrule_out,
+                            completed: Some(false),
+                        },
+                        "EVENT" => TicketPayload::Event {
+                            title,
+                            scheduled_time_iso,
+                            rrule: rrule_out,
+                            duration_minutes,
+                            completed: Some(false),
+                        },
+                        _ => TicketPayload::Task {
+                            title,
+                            scheduled_time_iso,
+                            rrule: rrule_out,
+                            duration_minutes,
+                            completed: Some(false),
+                        },
+                    };
+
                     let entity_id = Uuid::new_v4().to_string();
                     match append_pending_action(
                         &app,
                         SyncActionType::Create,
                         entity_id,
-                        ticket_type_str.to_uppercase(),
+                        ticket_type_str.clone(),
                         Some(payload),
                         Some(TicketStatus::Idle),
                         notes,
@@ -432,6 +444,13 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     };
 
                     let notes = args.get("notes").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    
+                    // To do a generic edit cleanly since payload variants are strictly typed, 
+                    // we can wrap the payload_updates in a Generic payload and the reconcile logic
+                    // knows how to shallow merge a Generic into a Generic if it was Generic.
+                    // But if base is strongly typed, SyncActionType::Update merging using Generic is weak.
+                    // Instead, let's construct a TicketPayload::Generic just for the update,
+                    // or serialize it out and merge.
                     let mut payload_updates = serde_json::Map::new();
                     if let Some(title) = args.get("title") { payload_updates.insert("title".to_string(), title.clone()); }
                     
@@ -459,7 +478,7 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         SyncActionType::Update,
                         task_id.to_string(),
                         updated_entity_type, 
-                        if payload_updates.is_empty() { None } else { Some(serde_json::Value::Object(payload_updates)) },
+                        if payload_updates.is_empty() { None } else { Some(TicketPayload::Generic(serde_json::Value::Object(payload_updates))) },
                         None,
                         notes,
                     ).await {
@@ -477,15 +496,18 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     let max_origin = std::cmp::min(15, origin.len());
                     let max_dest = std::cmp::min(15, destination.len());
                     
-                    let payload = serde_json::json!({
-                        "title": format!("{}: {}... -> {}... @ {}", label, &origin[..max_origin], &destination[..max_dest], deadline),
-                        "label": label,
-                        "origin": origin,
-                        "destination": destination,
-                        "deadline": deadline,
-                        "days": days,
-                        "completed": false
-                    });
+                    let payload = TicketPayload::Commute {
+                        title: format!("{}: {}... -> {}... @ {}", label, &origin[..max_origin], &destination[..max_dest], deadline),
+                        label: Some(label.to_string()),
+                        origin: origin.to_string(),
+                        destination: destination.to_string(),
+                        deadline: Some(deadline.to_string()),
+                        days: Some(days.to_string()),
+                        live: None,
+                        minutes_remaining: None,
+                        directions: None,
+                        completed: Some(false),
+                    };
                     
                     match append_pending_action(
                         &app,
@@ -507,12 +529,18 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     let max_origin = std::cmp::min(15, origin.len());
                     let max_dest = std::cmp::min(15, destination.len());
                     
-                    let payload = serde_json::json!({
-                        "title": format!("Directions: {}... -> {}...", &origin[..max_origin], &destination[..max_dest]),
-                        "origin": origin,
-                        "destination": destination,
-                        "directions": {"steps": [], "total_duration": "Enriching via Server...", "error": serde_json::Value::Null}
-                    });
+                    let payload = TicketPayload::Commute {
+                        title: format!("Directions: {}... -> {}...", &origin[..max_origin], &destination[..max_dest]),
+                        label: None,
+                        origin: origin.to_string(),
+                        destination: destination.to_string(),
+                        deadline: None,
+                        days: None,
+                        live: None,
+                        minutes_remaining: None,
+                        directions: Some(serde_json::json!({"steps": [], "total_duration": "Enriching via Server...", "error": serde_json::Value::Null})),
+                        completed: None,
+                    };
                     
                     match append_pending_action(
                         &app,
@@ -534,14 +562,18 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     
                     let max_dest = std::cmp::min(40, destination.len());
                     
-                    let payload = serde_json::json!({
-                        "title": format!("Trip to {}", &destination[..max_dest]),
-                        "origin": origin,
-                        "destination": destination,
-                        "live": true,
-                        "minutes_remaining": minutes,
-                        "directions": {"steps": [], "total_duration": "Enriching via Server...", "error": serde_json::Value::Null}
-                    });
+                    let payload = TicketPayload::Commute {
+                        title: format!("Trip to {}", &destination[..max_dest]),
+                        label: None,
+                        origin: origin.to_string(),
+                        destination: destination.to_string(),
+                        deadline: None,
+                        days: None,
+                        live: Some(true),
+                        minutes_remaining: Some(minutes),
+                        directions: Some(serde_json::json!({"steps": [], "total_duration": "Enriching via Server...", "error": serde_json::Value::Null})),
+                        completed: None,
+                    };
                     
                     match append_pending_action(
                         &app,
@@ -562,11 +594,11 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     
                     let expires_at = Utc::now() + chrono::Duration::minutes(duration);
                     
-                    let payload = serde_json::json!({
-                        "title": title,
-                        "duration_minutes": duration,
-                        "expires_at": expires_at.to_rfc3339()
-                    });
+                    let payload = TicketPayload::Countdown {
+                        title: title.to_string(),
+                        duration_minutes: duration,
+                        expires_at: Some(expires_at.to_rfc3339()),
+                    };
                     
                     match append_pending_action(
                         &app,
@@ -645,6 +677,18 @@ async fn get_user_locale(app: AppHandle) -> Result<(String, bool), String> {
     Ok((locale, hour12))
 }
 
+#[tauri::command]
+async fn complete_onboarding(app: AppHandle, mode: String) -> Result<(), String> {
+    let mut settings = get_settings(app.clone()).await?;
+    settings.onboarding_complete = true;
+    settings.sync_mode = match mode.as_str() {
+        "CloudOfficial" => SyncMode::CloudOfficial,
+        "CloudCustom" => SyncMode::CloudCustom,
+        _ => SyncMode::LocalOnly,
+    };
+    save_settings(app, settings).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -658,7 +702,8 @@ pub fn run() {
             chat_local,
             get_tasks,
             apply_sync_update,
-            get_user_locale
+            get_user_locale,
+            complete_onboarding
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
