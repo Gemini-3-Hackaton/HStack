@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, createContext, ReactNode, useContext, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
+import { invoke } from '@tauri-apps/api/core';
 
 export type TicketType = 'HABIT' | 'EVENT' | 'TASK' | 'COMMUTE' | 'COUNTDOWN';
 export type TicketStatus = 'idle' | 'in_focus' | 'completed' | 'expired';
 
 export interface TaskModel {
   id: string;
+  title: string;
   type: TicketType;
   status: TicketStatus;
   payload: any;
@@ -168,13 +170,21 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
 
   const fetchFullState = async () => {
       try {
-          const res = await fetch(`http://localhost:8000/api/tasks?userid=${userId}`);
-          if (res.ok) {
-              const fullTasks = await res.json();
-              persistState(fullTasks, localHistory);
-          }
+          // Primary source: Tauri/Rust backend (Projected State)
+          const fullTasks = await invoke<TaskModel[]>("get_tasks");
+          persistState(fullTasks, localHistory);
+          console.log("State refreshed from Rust backend");
       } catch (err) {
-          console.error("Fetch full state failed", err);
+          console.warn("Tauri fetch failed, trying server...", err);
+          try {
+              const res = await fetch(`http://localhost:8000/api/tasks?userid=${userId}`);
+              if (res.ok) {
+                  const fullTasks = await res.json();
+                  persistState(fullTasks, localHistory);
+              }
+          } catch (serverErr) {
+              console.error("Both fetch paths failed", serverErr);
+          }
       }
   };
 
@@ -202,6 +212,7 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
     if (action.type === 'CREATE') {
         newTasks.push({ 
             id: action.entity_id, 
+            title: action.payload?.title || 'Untitled',
             type: action.entity_type as TicketType, 
             payload: action.payload,
             status: action.status || 'idle'

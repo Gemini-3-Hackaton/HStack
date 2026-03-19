@@ -1,23 +1,18 @@
 import { useState, useEffect, useRef } from "react";
 import { SyncProvider, useSync, TaskModel } from "./SyncEngine";
-import { Send, X, ChevronDown, Plus, Trash2, Wifi, WifiOff } from "lucide-react";
-import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { Send, ChevronDown, Plus, Trash2, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { WebGLGrain } from "./components/WebGLGrain";
 import { motion, AnimatePresence } from "framer-motion";
+import { Settings } from "./components/Settings";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
 // --- Specialized Card Components ---
-
-const formatDate = (dateString?: string) => {
-    if (!dateString) return "";
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-};
 
 // --- Engraved Dark Themes ---
 
@@ -355,11 +350,6 @@ const TicketCard = ({ task }: { task: TaskModel }) => {
     
     const theme = type === 'HABIT' ? THEMES.habit : type === 'EVENT' ? THEMES.event : THEMES.default;
 
-    const handleToggleComplete = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        updateTask(task.id, { ...payload, completed: !isCompleted });
-    };
-
     const onDragEnd = (_: any, info: any) => {
         if (info.offset.x < -100) {
             // Delete on swipe left
@@ -471,7 +461,8 @@ function App() {
     const [isProcessing, setIsProcessing] = useState(false);
     const [placeholder, setPlaceholder] = useState("Tell AI to manage your stack...");
     const [feedback, setFeedback] = useState<string | null>(null);
-    const [integrations, setIntegrations] = useState<string[]>([]);
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const [integrations] = useState<string[]>([]);
 
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const tauriWindow = useRef(getCurrentWindow());
@@ -550,10 +541,10 @@ function App() {
             {/* Full-page dithered background */}
             <WebGLGrain 
                 colors={{
-                    c1: [16, 16, 16],
-                    c2: [12, 12, 12], 
-                    c3: [9, 9, 9], 
-                    c4: [6, 6, 6] 
+                    c1: [20, 20, 20],
+                    c2: [15, 15, 15], 
+                    c3: [10, 10, 10], 
+                    c4: [5, 5, 5] 
                 }}
                 spreadX={0.35}
                 spreadY={1.1}
@@ -580,6 +571,12 @@ function App() {
                     </button>
 
                     <div className="flex items-center gap-3 pointer-events-auto h-full">
+                        <button 
+                            onClick={() => setIsSettingsOpen(true)}
+                            className="w-9 h-9 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all bg-white/5 rounded-full hover:bg-white/10"
+                        >
+                            <SettingsIcon size={18} />
+                        </button>
                         {/* Connectivity Indicator */}
                         <div className={cn(
                             "w-9 h-9 rounded-full flex items-center justify-center border transition-all duration-300 bg-white/5",
@@ -737,6 +734,11 @@ function App() {
                     </form>
                 </div>
             </div>
+            <AnimatePresence>
+                {isSettingsOpen && (
+                    <Settings isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+                )}
+            </AnimatePresence>
         </main>
     );
 }
