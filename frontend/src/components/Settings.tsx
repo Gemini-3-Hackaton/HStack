@@ -83,6 +83,8 @@ export interface UserSettings {
     providers: SavedProvider[];
     default_provider_id: string | null;
     local_processing: boolean;
+    locale: string | null;
+    hour12: boolean | null;
 }
 
 interface SettingsProps {
@@ -199,7 +201,7 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                         spreadX={0.35} spreadY={1.1} contrast={2.0} noiseFactor={0.7} opacity={1.0}
                     />
 
-                    <div className="relative z-20 flex-1 flex flex-col p-6 pt-12 overflow-hidden">
+                    <div className="relative z-20 h-full flex flex-col p-6 pt-12">
                         {/* Header */}
                         <div className="flex items-center justify-between mb-8 shrink-0" data-tauri-drag-region>
                             <div className="flex items-center gap-3 pointer-events-none" data-tauri-drag-region>
@@ -210,22 +212,23 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                             </div>
                             <button 
                                 onClick={onClose}
-                                className="w-10 h-10 rounded-full hover:bg-white/5 flex items-center justify-center text-[#777] hover:text-[#D1D1D1] transition-all"
+                                className="w-10 h-10 rounded-full hover:bg-white/5 flex items-center justify-center text-[#777] hover:text-[#D1D1D1] transition-all shrink-0"
                             >
                                 <X size={24} />
                             </button>
                         </div>
 
-                        {/* Providers Section */}
-                        <div className="flex-1 overflow-y-auto no-scrollbar flex flex-col gap-6">
-                            <section>
+                        {/* Scrollable Content Area */}
+                        <div className="flex-1 overflow-y-auto no-scrollbar pr-2 pb-2">
+                            {/* Providers Section */}
+                            <section className="mb-8">
                                 <div className="flex items-center justify-between mb-4 px-1">
                                     <h3 className="text-[12px] uppercase tracking-widest font-bold text-[#777] flex items-center gap-2">
                                         LLM Providers
                                     </h3>
                                     <button 
                                         onClick={handleAddNew}
-                                        className="text-[9px] font-bold uppercase tracking-widest text-[#D1D1D1] hover:text-white transition-colors flex items-center gap-1.5"
+                                        className="text-[9px] font-bold uppercase tracking-widest text-[#D1D1D1] hover:text-white transition-colors flex items-center gap-1.5 shrink-0"
                                     >
                                         <Plus size={12} />
                                         Add New
@@ -246,13 +249,13 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                     onClick={() => setDefault(p.id)} 
                                                 />
                                                 <div className="flex items-start justify-between relative z-20 pointer-events-none">
-                                                    <div className="flex flex-col gap-1">
+                                                    <div className="flex flex-col gap-1 min-w-0">
                                                         <div className="flex items-center gap-2">
-                                                            <span className="text-[15px] font-medium text-[#D1D1D1]">{p.name}</span>
+                                                            <span className="text-[15px] font-medium text-[#D1D1D1] truncate">{p.name}</span>
                                                         </div>
-                                                        <span className="text-[12px] text-[#777] font-mono tracking-tight">{p.model_name}</span>
+                                                        <span className="text-[12px] text-[#777] font-mono tracking-tight break-all">{p.model_name}</span>
                                                     </div>
-                                                    <div className="flex items-center gap-1 pointer-events-auto">
+                                                    <div className="flex items-center gap-1 pointer-events-auto shrink-0">
                                                         <button 
                                                             onClick={(e) => { e.stopPropagation(); handleEditProvider(p); }}
                                                             className="p-2 rounded-lg hover:bg-white/5 text-[#777] hover:text-[#D1D1D1] transition-all opacity-0 group-hover:opacity-100"
@@ -270,13 +273,13 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                     </div>
                                                 </div>
                                                 <div className="flex items-center gap-4 text-[11px] text-[#777] relative z-20 pointer-events-none">
-                                                    <div className="flex items-center gap-1.5">
+                                                    <div className="flex items-center gap-1.5 shrink-0">
                                                         <Database size={12} />
                                                         {p.kind === 'OpenAiCompatible' ? 'OpenAI compatible' : 'Google Gemini'}
                                                     </div>
-                                                    <div className="flex items-center gap-1.5 truncate max-w-[150px]">
-                                                        <Globe size={12} />
-                                                        {p.endpoint || 'Cloud API'}
+                                                    <div className="flex items-center gap-1.5 min-w-0">
+                                                        <Globe size={12} className="shrink-0" />
+                                                        <span className="truncate">{p.endpoint || 'Cloud API'}</span>
                                                     </div>
                                                 </div>
                                             </PhysicalWrapper>
@@ -290,10 +293,99 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                     )}
                                 </div>
                             </section>
+
+                            {/* Locale Settings - Positioned below providers in scroll area */}
+                            <section className="mt-6 border-t border-white/5 pt-6">
+                                <div className="flex items-center justify-between mb-4 px-1">
+                                    <h3 className="text-[12px] uppercase tracking-widest font-bold text-[#777] flex items-center gap-2">
+                                        Locale & Display
+                                    </h3>
+                                </div>
+
+                                <div className="flex flex-col gap-5">
+                                    <div className="flex flex-col gap-2">
+                                        <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">Language & Region</label>
+                                        <select 
+                                            value={settings?.locale || navigator.language || 'en-US'}
+                                            onChange={async (e) => {
+                                                if (!settings) return;
+                                                const updated = { ...settings, locale: e.target.value };
+                                                await invoke("save_settings", { settings: updated });
+                                                setSettings(updated);
+                                                // Show a subtle notification instead of full reload
+                                                setTimeout(() => {
+                                                    const event = new CustomEvent('localeUpdated');
+                                                    window.dispatchEvent(event);
+                                            }, 100);
+                                            }}
+                                            className="bg-[#141414] p-4 shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem] text-[14px] text-[#D1D1D1] outline-none border border-transparent hover:border-white/5 transition-all"
+                                        >
+                                            <option value="en-US">English (US)</option>
+                                            <option value="en-GB">English (UK)</option>
+                                            <option value="fr-FR">Français (France)</option>
+                                            <option value="de-DE">Deutsch (Deutschland)</option>
+                                            <option value="es-ES">Español (España)</option>
+                                            <option value="it-IT">Italiano (Italia)</option>
+                                            <option value="ja-JP">日本語 (日本)</option>
+                                            <option value="zh-CN">中文 (中国)</option>
+                                        </select>
+                                        <p className="text-[10px] text-[#555] px-1">Changes will apply on next app launch</p>
+                                    </div>
+
+                                    <div className="flex flex-col gap-2">
+                                        <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">Time Format</label>
+                                        <div className="bg-[#141414] p-[4px] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem] flex gap-2 border border-transparent">
+                                            <button
+                                                onClick={async () => {
+                                                    if (!settings) return;
+                                                    const updated = { ...settings, hour12: true };
+                                                    await invoke("save_settings", { settings: updated });
+                                                    setSettings(updated);
+                                                }}
+                                                className={cn(
+                                                    "relative flex-1 py-3 rounded-[13px] text-[12px] font-medium transition-all overflow-hidden",
+                                                    settings?.hour12 !== false ? "text-[#D1D1D1] shadow-[0_2px_5px_rgba(0,0,0,0.7)]" : "text-[#777] hover:text-[#D1D1D1] bg-transparent"
+                                                )}
+                                            >
+                                                {settings?.hour12 !== false && (
+                                                    <>
+                                                        <WebGLGrain colors={THEMES.default} />
+                                                        <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03]" />
+                                                        <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03]" />
+                                                    </>
+                                                )}
+                                                <span className="relative z-10">12-hour (AM/PM)</span>
+                                            </button>
+                                            <button
+                                                onClick={async () => {
+                                                    if (!settings) return;
+                                                    const updated = { ...settings, hour12: false };
+                                                    await invoke("save_settings", { settings: updated });
+                                                    setSettings(updated);
+                                                }}
+                                                className={cn(
+                                                    "relative flex-1 py-3 rounded-[13px] text-[12px] font-medium transition-all overflow-hidden",
+                                                    settings?.hour12 === false ? "text-[#D1D1D1] shadow-[0_2px_5px_rgba(0,0,0,0.7)]" : "text-[#777] hover:text-[#D1D1D1] bg-transparent"
+                                                )}
+                                            >
+                                                {settings?.hour12 === false && (
+                                                    <>
+                                                        <WebGLGrain colors={THEMES.default} />
+                                                        <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03]" />
+                                                        <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03]" />
+                                                    </>
+                                                )}
+                                                <span className="relative z-10">24-hour</span>
+                                            </button>
+                                        </div>
+                                        <p className="text-[10px] text-[#555] px-1">Changes will apply on next app launch</p>
+                                    </div>
+                                </div>
+                            </section>
                         </div>
 
-                        {/* Footer / Info */}
-                        <div className="mt-6 pt-6 border-t border-white/5">
+                        {/* Footer / Info - Fixed at bottom */}
+                        <div className="mt-6 pt-6 border-t border-white/5 shrink-0">
                             <div className="flex items-center gap-3 p-4 rounded-[1.25rem] bg-[#141414] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] border border-transparent text-[11px] text-[#777] leading-relaxed relative overflow-hidden">
                                 <Key size={16} className="shrink-0 text-[#D1D1D1] relative z-10" />
                                 <p className="relative z-10">API keys are securely stored in your OS Keychain (Hardware Encrypted) and never written to disk in plaintext.</p>
@@ -378,6 +470,88 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                             onChange={(e: any) => setNewProvider({...newProvider, apiKey: e.target.value})}
                                             placeholder={newProvider.id ? "•••••••• (Leave blank to keep existing)" : "••••••••"}
                                         />
+
+                                        {/* Locale Settings */}
+                                        <div className="flex flex-col gap-2">
+                                            <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">Locale</label>
+                                            <select 
+                                                value={settings?.locale || navigator.language || 'en-US'}
+                                                onChange={async (e) => {
+                                                    if (!settings) return;
+                                                    const updated = { ...settings, locale: e.target.value };
+                                                    await invoke("save_settings", { settings: updated });
+                                                    setSettings(updated);
+                                                    // Reload locale in App.tsx
+                                                    await new Promise(resolve => setTimeout(resolve, 100));
+                                                    window.location.reload();
+                                                }}
+                                                className="bg-[#141414] p-4 shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem] text-[14px] text-[#D1D1D1] outline-none"
+                                            >
+                                                <option value="en-US">English (US)</option>
+                                                <option value="en-GB">English (UK)</option>
+                                                <option value="fr-FR">Français (France)</option>
+                                                <option value="de-DE">Deutsch (Deutschland)</option>
+                                                <option value="es-ES">Español (España)</option>
+                                                <option value="it-IT">Italiano (Italia)</option>
+                                                <option value="ja-JP">日本語 (日本)</option>
+                                                <option value="zh-CN">中文 (中国)</option>
+                                                <option value="auto">Auto-detect</option>
+                                            </select>
+                                        </div>
+
+                                        <div className="flex flex-col gap-2">
+                                            <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">Time Format</label>
+                                            <div className="bg-[#141414] p-[4px] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem] flex gap-2">
+                                                <button
+                                                    onClick={async () => {
+                                                        if (!settings) return;
+                                                        const updated = { ...settings, hour12: true };
+                                                        await invoke("save_settings", { settings: updated });
+                                                        setSettings(updated);
+                                                        // Reload locale in App.tsx
+                                                        await new Promise(resolve => setTimeout(resolve, 100));
+                                                        window.location.reload();
+                                                    }}
+                                                    className={cn(
+                                                        "relative flex-1 py-3 rounded-[13px] text-[12px] font-medium transition-all overflow-hidden",
+                                                        settings?.hour12 !== false ? "text-[#D1D1D1] shadow-[0_2px_5px_rgba(0,0,0,0.7)]" : "text-[#777] hover:text-[#D1D1D1] bg-transparent"
+                                                    )}
+                                                >
+                                                    {settings?.hour12 !== false && (
+                                                        <>
+                                                            <WebGLGrain colors={THEMES.default} />
+                                                            <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03]" />
+                                                            <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03]" />
+                                                        </>
+                                                    )}
+                                                    <span className="relative z-10">12-hour (AM/PM)</span>
+                                                </button>
+                                                <button
+                                                    onClick={async () => {
+                                                        if (!settings) return;
+                                                        const updated = { ...settings, hour12: false };
+                                                        await invoke("save_settings", { settings: updated });
+                                                        setSettings(updated);
+                                                        // Reload locale in App.tsx
+                                                        await new Promise(resolve => setTimeout(resolve, 100));
+                                                        window.location.reload();
+                                                    }}
+                                                    className={cn(
+                                                        "relative flex-1 py-3 rounded-[13px] text-[12px] font-medium transition-all overflow-hidden",
+                                                        settings?.hour12 === false ? "text-[#D1D1D1] shadow-[0_2px_5px_rgba(0,0,0,0.7)]" : "text-[#777] hover:text-[#D1D1D1] bg-transparent"
+                                                    )}
+                                                >
+                                                    {settings?.hour12 === false && (
+                                                        <>
+                                                            <WebGLGrain colors={THEMES.default} />
+                                                            <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03]" />
+                                                            <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03]" />
+                                                        </>
+                                                    )}
+                                                    <span className="relative z-10">24-hour</span>
+                                                </button>
+                                            </div>
+                                        </div>
 
                                         <button 
                                             onClick={handleUpsertProvider}

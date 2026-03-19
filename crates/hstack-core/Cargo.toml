@@ -13,3 +13,5 @@ tracing = "0.1"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10.9"
+regex = "1.12.3"
+rrule = "0.14.0"

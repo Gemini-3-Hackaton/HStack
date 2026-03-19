@@ -73,17 +73,13 @@ pub fn tool_schemas() -> Vec<Tool> {
                             "type": "string",
                             "description": "Optional: Detailed context, research results, or user preferences for this specific ticket. Use Markdown formatting."
                         },
-                        "scheduled_time": {
+                        "rrule": {
                             "type": "string",
-                            "description": "Optional: Specific time for the ticket (e.g., '9 AM', '14:30', '2026-03-17 15:00'). Triggers the 'Scope' visual sidebar."
+                            "description": "Optional: RRULE (iCalendar RFC 5545) for scheduling. Format: 'DTSTART:YYYYMMDDTHHMMSS' for one-time, or 'DTSTART:YYYYMMDDTHHMMSS RRULE:FREQ=WEEKLY;BYDAY=MO' for recurring. Examples: DTSTART:20260320T090000 (tomorrow 9am), DTSTART:20260324T090000 RRULE:FREQ=WEEKLY;BYDAY=MO (every Monday)"
                         },
                         "duration_minutes": {
                             "type": "integer",
                             "description": "Optional: Estimated duration in minutes."
-                        },
-                        "recurrence": {
-                            "type": "string",
-                            "description": "Optional: Recurrence DSL for HABITs. Use formats like: 'DAILY', 'WEEKDAYS', 'MON, WED, FRI', '9TH OF MONTH', '9TH, 10TH OF MONTH', '1ST MON OF MONTH'."
                         }
                     },
                     "required": ["type", "title"]
@@ -142,17 +138,13 @@ pub fn tool_schemas() -> Vec<Tool> {
                             "type": "string",
                             "description": "The new detailed notes for this ticket. Skip if no change."
                         },
-                        "scheduled_time": {
+                        "rrule": {
                             "type": "string",
-                            "description": "The new scheduled time. Skip if no change."
+                            "description": "The new RRULE (iCalendar RFC 5545) for scheduling. Skip if no change. Format: 'DTSTART:YYYYMMDDTHHMMSS' or 'DTSTART:YYYYMMDDTHHMMSS RRULE:FREQ=WEEKLY;BYDAY=MO'"
                         },
                         "duration_minutes": {
                             "type": "integer",
                             "description": "The new duration. Skip if no change."
-                        },
-                        "recurrence": {
-                            "type": "string",
-                            "description": "The new recurrence pattern. Skip if no change."
                         }
                     },
                     "required": ["task_id"]

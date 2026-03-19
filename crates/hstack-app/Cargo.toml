@@ -32,4 +32,6 @@ tauri-plugin-store = "2.4.2"
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "linux-native"] }
 uuid = { version = "1.22.0", features = ["v4"] }
 chrono = { version = "0.4.44", features = ["serde"] }
+regex = "1.12.3"
+rrule = "0.14.0"
 

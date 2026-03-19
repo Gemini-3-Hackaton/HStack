@@ -67,79 +67,73 @@ When an AI agent or IDE is working on something in the background:
 
 ## Architecture
 
+HStack uses a **local-first, shared-core** architecture to ensure maximum performance, privacy, and reliability across platforms.
+
 ```
 ┌─────────────────────────────────────────────────┐
-│                  Frontend (Tauri)                │
-│       React · WebGL Shaders · Tailwind CSS       │
-│    Chat → /api/chat    Polls → /api/sync         │
+│                Frontend (Tauri)                 │
+│      React · Framer Motion · Tailwind CSS       │
+│    (Invokes Rust commands for logic/sync)       │
 └───────────────┬─────────────────┬───────────────┘
                 │                 │
         ┌───────▼───────┐  ┌─────▼──────────────┐
-        │  FastAPI :8080 │  │ Commute Scheduler  │
-        │   main.py      │  │ (asyncio background)│
-        │   Gemini AI    │  │ commute_scheduler.py│
+        │  hstack-app    │  │   hstack-core      │
+        │ (Tauri / Rust) │  │  (Shared Logic)    │
+        │ Security/Vault │  │  LLM Providers     │
+        │ Local Store    │  │  Sync Engine       │
         └───────┬───────┘  └─────┬──────────────┘
                 │                 │
         ┌───────▼─────────────────▼───────┐
-        │       Directions Service :8001   │
-        │   Google Maps Directions API     │
-        │   services/directions/main.py    │
+        │        System Keychain          │
+        │  (macOS Secure Enclave / Win / Linux)│
+        │  Hardware-encrypted API Keys    │
         └─────────────────────────────────┘
-                │
-        ┌───────▼───────┐
-        │  PostgreSQL    │
-        │  (Supabase)    │
-        └───────────────┘
 ```
 
 | Component | Tech | Role |
 |-----------|------|------|
-| **Backend** | FastAPI, Python 3.11+ | API server, AI orchestration, tool dispatch |
-| **AI** | Google Gemini (`gemini-flash-latest`) | Natural language → function calls |
-| **Directions** | Google Maps API via `googlemaps` | Transit routing microservice |
-| **Database** | PostgreSQL (Supabase) via `asyncpg` | Persistent task/user storage |
-| **Scheduler** | asyncio background task | Periodic commute checks, live trip polling |
-| **Frontend** | Vanilla JS, WebGL, CSS | Chat UI, ticket cards, alert banners |
+| **Core** | Rust (`hstack-core`) | Shared business logic, LLM providers (Gemini/OpenAI), deterministic sync hashing |
+| **App** | Tauri (`hstack-app`) | Native desktop shell, OS Keychain integration (Security), local state projection |
+| **Frontend** | React, Vite, Lucide | Interaction UI, ticket visualization, WebGL aesthetics |
+| **Security** | `keyring` (Rust) | Hardware-backed encryption for all LLM API keys |
+| **Sync** | Approach A (Projection) | Projection-based local-first state: `project(Base, PendingActions)` |
 
 ---
 
 ## Getting Started
 
 ### Prerequisites
-- Python 3.11+
-- [`uv`](https://docs.astral.sh/uv/) package manager
-- A PostgreSQL database (Supabase recommended)
-- Google Gemini API key
-- Google Maps API key (with Directions API enabled)
+- [Rust](https://www.rust-lang.org/tools/install) (latest stable)
+- [Node.js](https://nodejs.org/) & `npm`
+- [Tauri Dependencies](https://tauri.app/v1/guides/getting-started/prerequisites) (OS specific)
 
-### Environment Variables
+### Development
 
-Create a `.env` file at the project root:
-
-```env
-DATABASE_URL=postgresql://...
-GEMINI_API_KEY=your_gemini_key
-GOOGLE_MAPS_API_KEY=your_google_maps_key
-DIRECTIONS_SERVICE_URL=http://localhost:8001   # optional, this is the default
-```
-
-### Running
-
-**1. Start the Backend Server:**
+**1. Install Dependencies:**
 
 ```bash
-npx varlock run -- uv run uvicorn hstack.main:app --port 8000
-```
-
-**2. Start the Tauri Desktop App:**
-
-```bash
-cd frontend
+# Root
 npm install
-npm run tauri dev
+cd frontend && npm install
 ```
 
-The app will launch in a standalone, borderless window.
+**2. Run the Desktop App:**
+
+You can now launch the entire stack (Frontend + Rust Backend) directly from the project root:
+
+```bash
+npm run dev
+```
+
+*Note: The first run will compile the Rust core and download necessary crates, which may take a few minutes. Subsequent runs are much faster.*
+
+### Security Configuration
+
+HStack stores your API keys in your system's **Hardware-Encrypted Keychain**. To configure:
+1. Open the app.
+2. Click the **Settings Gear** in the top-right.
+3. Add a new LLM provider (Google Gemini or OpenAI-compatible like Ollama).
+4. Paste your API key — it will be saved securely to your OS and never written to disk in plaintext.
 
 ---
 

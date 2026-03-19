@@ -16,6 +16,8 @@ pub struct UserSettings {
     pub providers: Vec<SavedProvider>,
     pub default_provider_id: Option<String>,
     pub local_processing: bool,
+    pub locale: Option<String>,
+    pub hour12: Option<bool>,
 }
 
 impl UserSettings {

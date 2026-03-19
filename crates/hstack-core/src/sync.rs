@@ -113,6 +113,15 @@ pub fn project_state(base_tickets: Vec<Ticket>, actions: &[SyncAction]) -> Vec<T
             }
             SyncActionType::Update => {
                 if let Some(ticket) = effective_state.iter_mut().find(|t| t.id == action.entity_id) {
+                    // Apply type morphing
+                    ticket.r#type = match action.entity_type.to_uppercase().as_str() {
+                        "HABIT" => TicketType::Habit,
+                        "EVENT" => TicketType::Event,
+                        "COMMUTE" => TicketType::Commute,
+                        "COUNTDOWN" => TicketType::Countdown,
+                        _ => TicketType::Task,
+                    };
+
                     if let Some(status) = &action.status {
                         ticket.status = status.clone();
                     }

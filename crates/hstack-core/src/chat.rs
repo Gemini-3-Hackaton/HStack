@@ -13,6 +13,12 @@ pub type ToolExecutor = Box<
         + Sync,
 >;
 
+pub type ContextRefreshFn = Box<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, Error>> + Send>>
+        + Send
+        + Sync,
+>;
+
 // Helper to parse potential tool calls from a JSON value
 fn extract_tool_calls_from_json(json_val: &Value, tool_calls: &mut Vec<ToolCall>) {
     if let Some(arr) = json_val.as_array() {
@@ -48,6 +54,7 @@ pub async fn chat_loop(
     messages: &mut Vec<Message>,
     tools: &[Tool],
     tool_executor: &ToolExecutor,
+    context_refresh: Option<&ContextRefreshFn>,
 ) -> Result<Message, Error> {
     let max_iterations = 5;
     let mut iterations = 0;
@@ -149,6 +156,29 @@ pub async fn chat_loop(
                 tool_call_id: Some(call.id.clone()),
                 name: Some(call.function.name.clone()),
             });
+        }
+
+        // After executing tool calls, refresh system context if refresh function provided
+        if let Some(refresh_fn) = context_refresh {
+            // Check if there's a system message to replace
+            if let Some(system_msg_idx) = messages.iter().position(|m| m.role == Role::System) {
+                // Generate fresh context and replace
+                match refresh_fn().await {
+                    Ok(fresh_prompt) => {
+                        messages[system_msg_idx] = Message {
+                            role: Role::System,
+                            content: Some(fresh_prompt),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            name: None,
+                        };
+                        println!("--- SYSTEM CONTEXT REFRESHED AFTER TOOL EXECUTION ---");
+                    }
+                    Err(e) => {
+                        println!("--- WARNING: Failed to refresh system context: {} ---", e);
+                    }
+                }
+            }
         }
 
         iterations += 1;

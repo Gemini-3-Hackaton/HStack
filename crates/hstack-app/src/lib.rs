@@ -4,13 +4,14 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
 use serde_json::{json, Value};
 use hstack_core::provider::{Message, Role, ProviderConfig};
-use hstack_core::chat::{chat_loop, ToolExecutor};
+use hstack_core::chat::{chat_loop, ToolExecutor, ContextRefreshFn};
 use hstack_core::settings::{UserSettings, SavedProvider};
 use hstack_core::ticket::{tool_schemas, Ticket, TicketStatus};
 use hstack_core::sync::{SyncAction, SyncActionType, project_state, reconcile_state};
+use hstack_core::temporal_parser::parse_agent_rrule;
 use secure_store::SecureStore;
 use uuid::Uuid;
-use chrono::Utc;
+use chrono::{Utc, Local, Datelike};
 
 #[tauri::command]
 async fn get_settings(app: AppHandle) -> Result<UserSettings, String> {
@@ -148,30 +149,8 @@ async fn get_tasks(app: AppHandle) -> Result<Vec<Ticket>, String> {
     Ok(project_state(base_tickets, &pending_actions))
 }
 
-#[tauri::command]
-async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> Result<Vec<Message>, String> {
-    println!("--- CHAT LOCAL RECEIVED MESSAGE: {} ---", message);
-    let settings = match get_settings(app.clone()).await {
-        Ok(s) => s,
-        Err(e) => return Err(e),
-    };
-
-    let active_provider = match settings.active_provider() {
-        Some(p) => p,
-        None => return Err("No active provider configured".to_string()),
-    };
-    
-    // Resolve full config by fetching key from the app's secure store
-    let api_key = SecureStore::get_key(&active_provider.id)?;
-    let config = ProviderConfig {
-        name: active_provider.name.clone(),
-        kind: active_provider.kind.clone(),
-        endpoint: active_provider.endpoint.clone(),
-        api_key,
-        model_name: active_provider.model_name.clone(),
-        rate_limit: active_provider.rate_limit.clone(),
-    };
-
+// Extract system prompt building into a separate function that can be called multiple times
+async fn build_system_prompt_with_fresh_context(app: AppHandle) -> Result<String, String> {
     // Fetch current tasks for context
     let current_tasks = get_tasks(app.clone()).await.unwrap_or_default();
     let context_str = serde_json::to_string_pretty(&current_tasks).unwrap_or_else(|_| "[]".to_string());
@@ -199,48 +178,108 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Get local user context
+    let now = Local::now();
+    let local_time = now.format("%H:%M").to_string();
+    let local_date = now.format("%Y-%m-%d").to_string();
+    let weekday = now.weekday().to_string();
+    let offset = now.offset().to_string();
+
+    let full_prompt = format!(
+"
+RECENT ACTIONS:
+{}
+
+CURRENT STACK:
+{}
+
+USER CONTEXT:
+- Local Time: {}
+- Local Date: {}
+- Today is {}
+- UTC Offset: {}
+
+You are a ticket management assistant for HStack.
+You manage a 'stack' of tickets for the user.
+
+CRITICAL: TEMPORAL EXTRACTION - RRULE FORMAT (RFC 5545)
+The `rrule` field MUST be a valid RRULE string following iCalendar RFC 5545.
+
+RRULE STRUCTURE:
+- DTSTART: Start datetime (YYYYMMDDTHHMMSSZ) - ALWAYS append 'Z' and calculate the UTC time using the user's offset.
+- RRULE: Recurrence rule (optional, for repeating events)
+
+COMMON PATTERNS:
+- One-time tomorrow 9am: DTSTART:20260320T090000Z
+- Every Monday 9am: DTSTART:20260324T090000Z RRULE:FREQ=WEEKLY;BYDAY=MO
+- Daily 9am: DTSTART:20260320T090000Z RRULE:FREQ=DAILY
+
+RULES:
+1. Calculate DTSTART in UTC based on the user's relative date and local timezone offset.
+2. Include RRULE only for recurring events (HABIT type).
+3. Separate DTSTART and RRULE with a space.
+
+CRITICAL: TOOL CALLING RULES
+1. ALWAYS use tools for state changes - never just describe what you would do.
+2. Extract parameters EXACTLY from user input - don't invent values.
+3. When editing, only include fields that need to change.
+4. If multiple actions needed, make multiple tool calls.
+4. **IF A TOOL CALL FAILS**: You will see a ⚠️ error message. Read it and try again.
+
+TICKET TYPES:
+- HABIT: Recurring routines (uses rrule field).
+- TASK: One-off actions or things to do (most common).
+- EVENT: Time-specific appointments with location/context.
+
+TOOL EXAMPLES:
+- create_ticket: {{\"type\": \"TASK\", \"title\": \"Walk the dog\", \"rrule\": \"DTSTART:20260320T140000Z\"}}
+- edit_ticket: {{\"task_id\": \"uuid\", \"rrule\": \"DTSTART:20260322T090000Z\"}}
+- create_ticket: {{\"type\": \"HABIT\", \"title\": \"Morning workout\", \"rrule\": \"DTSTART:20260320T070000Z RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\"}}
+
+REMEMBER:
+- NO EMOJIS in titles.
+- Keep titles clean and concise.
+- Date qualifiers (tomorrow, today, Monday) go in scheduled_time, not the title.",
+        recent_actions_str,
+        context_str,
+        local_time,
+        local_date,
+        weekday,
+        offset
+    );
+
+    Ok(full_prompt)
+}
+
+#[tauri::command]
+async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> Result<Vec<Message>, String> {
+    println!("--- CHAT LOCAL RECEIVED MESSAGE: {} ---", message);
+    let settings = match get_settings(app.clone()).await {
+        Ok(s) => s,
+        Err(e) => return Err(e),
+    };
+
+    let active_provider = match settings.active_provider() {
+        Some(p) => p,
+        None => return Err("No active provider configured".to_string()),
+    };
+    
+    // Resolve full config by fetching key from the app's secure store
+    let api_key = SecureStore::get_key(&active_provider.id)?;
+    let config = ProviderConfig {
+        name: active_provider.name.clone(),
+        kind: active_provider.kind.clone(),
+        endpoint: active_provider.endpoint.clone(),
+        api_key,
+        model_name: active_provider.model_name.clone(),
+        rate_limit: active_provider.rate_limit.clone(),
+    };
+
     let mut messages = history.clone();
     
     // Inject system instructions if not present
     if !messages.iter().any(|m| m.role == Role::System) {
-        let full_prompt = format!(
-            "You are a ticket management assistant for HStack.
-You manage a 'stack' of tickets for the user. 
-
-CRITICAL: MEMORY & CONTEXT MANAGEMENT
-1. SHORT-TERM CONTEXT: You have access to the recent conversation history. Use it to remember user clarifications.
-2. REASONING & CLARIFICATION:
-   - ALWAYS REASON BEFORE ACTING. Explain your intent briefly in text.
-   - If a request is AMBIGUOUS or lacks details, ASK the user clarifying questions before calling tools.
-   - Avoid repetitive tool calls. Check RECENT ACTIONS before performing an operation.
-3. FAT TICKETS: Each ticket has a `notes` field. Use it for ticket-specific research or context.
-4. SYSTEM PROFILE: Use the ticket with title 'SYSTEM_PROFILE' (type: TASK) for persistent global user memory.
-
-CRITICAL: TEMPORAL EXTRACTION & NORMALIZATION
-1. EXTRACT scheduled_time: Mandate extraction of any temporal data (e.g. 15:00).
-2. NORMALIZE scheduled_time: Always convert to HH:MM (24-hour) e.g. \"08:00\".
-3. SCHEDULING DSL for HABITs: Use `recurrence` (e.g., `WEEKDAYS`, `MON, WED, FRI`).
-
-RECENT ACTIONS PERFORMED:
-{}
-
-CURRENT TICKET STACK (JSON):
-{}
-
-TICKET CATEGORIES:
-- HABIT: Routines.
-- TASK: One-off actions.
-- EVENT: Time-specific appointments.
-
-ACTION RULES:
-1. ALWAYS use the provided tools for state changes.
-2. NO EMOJIS in titles.
-3. Respond with a brief confirmation of actions.
-
-IMPORTANT: If your execution environment does not support native function calling, output your action as a raw JSON block.",
-            if recent_actions_str.is_empty() { "No recent actions.".to_string() } else { recent_actions_str },
-            context_str
-        );
+        let full_prompt = build_system_prompt_with_fresh_context(app.clone()).await?;
         
         messages.insert(0, Message {
             role: Role::System,
@@ -278,9 +317,26 @@ IMPORTANT: If your execution environment does not support native function callin
                     if let Some(obj) = payload.as_object_mut() {
                         if let Some(args_obj) = args.as_object() {
                             for (k, v) in args_obj {
-                                if k != "type" && k != "notes" {
+                                if k != "type" && k != "notes" && k != "rrule" {
                                     obj.insert(k.clone(), v.clone());
                                 }
+                            }
+                        }
+                    }
+
+                    // Strict parsing for rrule
+                    if let Some(rrule_input) = args.get("rrule").and_then(|v| v.as_str()) {
+                        match parse_agent_rrule(rrule_input) {
+                            Ok((start_datetime, rrule_str)) => {
+                                if let Some(obj) = payload.as_object_mut() {
+                                    obj.insert("scheduled_time_iso".to_string(), json!(start_datetime.to_rfc3339()));
+                                    if let Some(rrule) = rrule_str {
+                                        obj.insert("rrule".to_string(), json!(rrule));
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                return Ok(format!("⚠️ Tool failed: {}. You must output a valid RFC 5545 string. Try again.", e));
                             }
                         }
                     }
@@ -296,75 +352,119 @@ IMPORTANT: If your execution environment does not support native function callin
                         notes,
                     ).await {
                         Ok(_) => Ok("Ticket created successfully.".to_string()),
-                        Err(e) => Err(hstack_core::error::Error::Internal(e)),
+                        Err(e) => Ok(format!("⚠️ Tool failed: {}. The agent should analyze this error and try again with corrected parameters or a different approach. Details: {}", name, e)),
                     }
                 }
                 "delete_ticket" => {
                     let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
                     if task_id.is_empty() {
-                        return Ok("Failed: task_id missing".to_string());
+                        return Ok("⚠️ Tool failed: task_id missing. The agent should identify the correct task_id from the conversation context and try again.".to_string());
                     }
                     
+                    let tasks = get_tasks(app.clone()).await.unwrap_or_default();
+                    let actual_entity_type = tasks.iter()
+                        .find(|t| t.id == task_id)
+                        .map(|t| format!("{:?}", t.r#type).to_uppercase())
+                        .unwrap_or_else(|| "TASK".to_string());
+
                     match append_pending_action(
                         &app,
                         SyncActionType::Delete,
                         task_id.to_string(),
-                        "TASK".to_string(), 
+                        actual_entity_type, 
                         None,
                         None,
                         None,
                     ).await {
                         Ok(_) => Ok("Ticket deleted.".to_string()),
-                        Err(e) => Err(hstack_core::error::Error::Internal(e)),
+                        Err(e) => Ok(format!("⚠️ Tool failed: {}. Details: {}", name, e)),
                     }
                 }
                 "delete_all_tickets" => {
                     let tasks = match get_tasks(app.clone()).await {
                         Ok(t) => t,
-                        Err(e) => return Ok(format!("Failed to retrieve tasks: {}", e)),
+                        Err(e) => return Ok(format!("⚠️ Tool failed: Could not retrieve tasks: {}", e)),
                     };
                     
                     if tasks.is_empty() {
-                        return Ok("Stack is already empty.".to_string());
+                        return Ok("⚠️ Tool failed: no tickets to delete.".to_string());
                     }
                     
-                    for task in tasks {
-                        let _ = append_pending_action(
-                            &app,
-                            SyncActionType::Delete,
-                            task.id,
-                            "TASK".to_string(), 
-                            None,
-                            None,
-                            None,
-                        ).await;
+                    if let Ok(store) = app.store("pending_actions.json") {
+                        let mut actions: Vec<SyncAction> = store.get("pending")
+                            .and_then(|val| serde_json::from_value(val).ok())
+                            .unwrap_or_default();
+                            
+                        for task in tasks {
+                            actions.push(SyncAction {
+                                action_id: Uuid::new_v4().to_string(),
+                                r#type: SyncActionType::Delete,
+                                entity_id: task.id,
+                                entity_type: format!("{:?}", task.r#type).to_uppercase(),
+                                status: None,
+                                payload: None,
+                                notes: None,
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                            });
+                        }
+                        
+                        store.set("pending", serde_json::json!(actions));
+                        let _ = store.save();
                     }
+                    
                     Ok("All tickets deleted.".to_string())
                 }
                 "edit_ticket" => {
                     let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
                     if task_id.is_empty() {
-                        return Ok("Failed: task_id missing".to_string());
+                        return Ok("⚠️ Tool failed: task_id missing.".to_string());
                     }
+
+                    let tasks = get_tasks(app.clone()).await.unwrap_or_default();
+                    let existing_ticket = tasks.iter().find(|t| t.id == task_id);
                     
+                    let updated_entity_type = if let Some(new_type) = args.get("type").and_then(|v| v.as_str()) {
+                        new_type.to_uppercase()
+                    } else {
+                        existing_ticket
+                            .map(|t| format!("{:?}", t.r#type).to_uppercase())
+                            .unwrap_or_else(|| "TASK".to_string())
+                    };
+
                     let notes = args.get("notes").and_then(|v| v.as_str()).map(|s| s.to_string());
                     let mut payload_updates = serde_json::Map::new();
                     if let Some(title) = args.get("title") { payload_updates.insert("title".to_string(), title.clone()); }
-                    if let Some(time) = args.get("scheduled_time") { payload_updates.insert("scheduled_time".to_string(), time.clone()); }
+                    
+                    // Strict parsing for rrule in edits
+                    if let Some(rrule_input) = args.get("rrule").and_then(|v| v.as_str()) {
+                        match parse_agent_rrule(rrule_input) {
+                            Ok((start_datetime, rrule_str)) => {
+                                payload_updates.insert("scheduled_time_iso".to_string(), serde_json::json!(start_datetime.to_rfc3339()));
+                                if let Some(rrule) = rrule_str {
+                                    payload_updates.insert("rrule".to_string(), serde_json::json!(rrule));
+                                } else {
+                                    payload_updates.insert("rrule".to_string(), serde_json::Value::Null);
+                                }
+                            },
+                            Err(e) => {
+                                return Ok(format!("⚠️ Tool failed: {}. You must output a valid RFC 5545 string. Try again.", e));
+                            }
+                        }
+                    }
+
                     if let Some(dur) = args.get("duration_minutes") { payload_updates.insert("duration_minutes".to_string(), dur.clone()); }
-                    if let Some(rec) = args.get("recurrence") { payload_updates.insert("recurrence".to_string(), rec.clone()); }
                     
                     match append_pending_action(
                         &app,
                         SyncActionType::Update,
                         task_id.to_string(),
-                        "TASK".to_string(), 
+                        updated_entity_type, 
                         if payload_updates.is_empty() { None } else { Some(serde_json::Value::Object(payload_updates)) },
                         None,
                         notes,
                     ).await {
                         Ok(_) => Ok("Ticket edited.".to_string()),
-                        Err(e) => Err(hstack_core::error::Error::Internal(e)),
+                        Err(e) => Ok(format!("⚠️ Tool failed: {}. Details: {}", name, e)),
                     }
                 }
                 "add_commute" => {
@@ -397,7 +497,7 @@ IMPORTANT: If your execution environment does not support native function callin
                         None,
                     ).await {
                         Ok(_) => Ok("Commute registered.".to_string()),
-                        Err(e) => Err(hstack_core::error::Error::Internal(e)),
+                        Err(e) => Ok(format!("⚠️ Tool failed: {}. The agent should analyze this error and try again with corrected parameters or a different approach. Details: {}", name, e)),
                     }
                 }
                 "get_directions" => {
@@ -424,7 +524,7 @@ IMPORTANT: If your execution environment does not support native function callin
                         None,
                     ).await {
                         Ok(_) => Ok("Directions ticket created. Enrichment pending server sync.".to_string()),
-                        Err(e) => Err(hstack_core::error::Error::Internal(e)),
+                        Err(e) => Ok(format!("⚠️ Tool failed: {}. The agent should analyze this error and try again with corrected parameters or a different approach. Details: {}", name, e)),
                     }
                 }
                 "start_live_directions" => {
@@ -453,7 +553,7 @@ IMPORTANT: If your execution environment does not support native function callin
                         None,
                     ).await {
                         Ok(_) => Ok("Live tracking created. Waiting on server sync for polling.".to_string()),
-                        Err(e) => Err(hstack_core::error::Error::Internal(e)),
+                        Err(e) => Ok(format!("⚠️ Tool failed: {}. The agent should analyze this error and try again with corrected parameters or a different approach. Details: {}", name, e)),
                     }
                 }
                 "create_countdown" => {
@@ -478,15 +578,25 @@ IMPORTANT: If your execution environment does not support native function callin
                         None,
                     ).await {
                         Ok(_) => Ok("Countdown created locally.".to_string()),
-                        Err(e) => Err(hstack_core::error::Error::Internal(e)),
+                        Err(e) => Ok(format!("⚠️ Tool failed: {}. The agent should analyze this error and try again with corrected parameters or a different approach. Details: {}", name, e)),
                     }
                 }
-                _ => Ok(format!("Unknown tool: {}", name)),
+                _ => Ok(format!("⚠️ Tool failed: unknown tool '{}'. The agent should use only valid tool names from the available tool list.", name)),
             }
         })
     });
 
-    match chat_loop(&config, &mut messages, &tools, &executor).await {
+    // Create context refresh callback
+    let app_clone2 = app.clone();
+    let context_refresh: ContextRefreshFn = Box::new(move || {
+        let app = app_clone2.clone();
+        Box::pin(async move {
+            build_system_prompt_with_fresh_context(app).await
+                .map_err(|e| hstack_core::error::Error::Internal(e))
+        })
+    });
+
+    match chat_loop(&config, &mut messages, &tools, &executor, Some(&context_refresh)).await {
         Ok(_) => Ok(messages.split_off(initial_len)),
         Err(e) => {
             let err_msg = format!("Chat processing failed: {}", e);
@@ -524,6 +634,17 @@ async fn apply_sync_update(app: AppHandle, new_base_tickets: Vec<Ticket>) -> Res
     }
 }
 
+#[tauri::command]
+async fn get_user_locale(app: AppHandle) -> Result<(String, bool), String> {
+    let settings = get_settings(app).await?;
+    let locale = settings.locale.unwrap_or_else(|| {
+        // Default to en-US if not set
+        "en-US".to_string()
+    });
+    let hour12 = settings.hour12.unwrap_or(true);
+    Ok((locale, hour12))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -536,7 +657,8 @@ pub fn run() {
             delete_provider,
             chat_local,
             get_tasks,
-            apply_sync_update
+            apply_sync_update,
+            get_user_locale
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
