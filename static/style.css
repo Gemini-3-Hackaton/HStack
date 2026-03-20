@@ -66,27 +66,30 @@ body {
 }
 
 .settings-button {
-    background: transparent;
+    background: var(--bg-surface);
     color: var(--text-primary);
     border: 1px solid var(--border-color);
-    border-radius: 999px;
+    border-radius: 12px;
     padding: 10px 14px;
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
-    transition: border-color 0.2s ease, background-color 0.2s ease;
+    box-shadow: 0 10px 24px rgba(0,0,0,0.28);
+    transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .settings-button:hover {
-    background: rgba(255,255,255,0.05);
-    border-color: rgba(255,255,255,0.28);
+    background: #202127;
+    border-color: rgba(255,255,255,0.18);
+    transform: translateY(-1px);
+    box-shadow: 0 12px 28px rgba(0,0,0,0.32);
 }
 
 .floating-settings-button {
-    position: fixed;
-    top: 28px;
-    right: 28px;
-    z-index: 50;
+    position: absolute;
+    top: 32px;
+    right: 0;
+    z-index: 20;
 }
 
 .hidden {
@@ -473,8 +476,13 @@ body {
 }
 
 .hosting-card {
-    max-width: 420px;
+    max-width: 400px;
     text-align: left;
+}
+
+.hosting-card h2,
+.modal-card h2 {
+    margin-bottom: 12px;
 }
 
 .hosting-copy {
@@ -491,7 +499,7 @@ body {
 
 .hosting-option {
     width: 100%;
-    background: var(--bg-input);
+    background: var(--bg-surface);
     border: 1px solid var(--border-color);
     border-radius: 12px;
     color: var(--text-primary);
@@ -501,18 +509,21 @@ body {
     gap: 6px;
     text-align: left;
     cursor: pointer;
-    transition: border-color 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+    transition: border-color 0.2s ease, transform 0.2s ease, background-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .hosting-option:hover {
-    border-color: rgba(255,255,255,0.28);
-    transform: translateY(-1px);
+    border-color: rgba(255,255,255,0.15);
+    background: #202127;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(0,0,0,0.28);
 }
 
 .hosting-option.selected {
     border-color: var(--accent-blue);
-    background: rgba(94, 106, 210, 0.14);
-    box-shadow: 0 0 0 1px rgba(94, 106, 210, 0.2);
+    background: linear-gradient(135deg, rgba(94, 106, 210, 0.18), rgba(94, 106, 210, 0.08));
+    box-shadow: 0 0 0 1px rgba(94, 106, 210, 0.18);
 }
 
 .hosting-option-title {
@@ -548,15 +559,14 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(11, 12, 14, 0.7);
-    backdrop-filter: blur(6px);
-    z-index: 1100;
+    background: var(--bg-main);
+    z-index: 1000;
     padding: 20px;
 }
 
 .modal-card {
     width: 100%;
-    max-width: 420px;
+    max-width: 400px;
     text-align: left;
 }
 
@@ -568,17 +578,21 @@ body {
 }
 
 .modal-close {
-    background: transparent;
+    background: var(--bg-input);
     color: var(--text-secondary);
-    border: none;
-    font-size: 18px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    font-size: 16px;
     cursor: pointer;
-    padding: 4px;
+    padding: 8px;
     line-height: 1;
+    transition: border-color 0.2s ease, color 0.2s ease, background-color 0.2s ease;
 }
 
 .modal-close:hover {
     color: var(--text-primary);
+    background: #202127;
+    border-color: rgba(255,255,255,0.18);
 }
 
 /* Pearl Fallback */
