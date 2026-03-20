@@ -27,6 +27,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const hostingSkip = document.getElementById('hosting-skip');
     const hostingWizardOptions = document.querySelectorAll('#hosting-wizard .hosting-option');
     const settingsHostingOptions = document.querySelectorAll('#settings-modal .hosting-option');
+    const HOSTING_DEFERRED = 'later';
 
     let currentUser = JSON.parse(localStorage.getItem('hstack_user'));
     let hostingOption = localStorage.getItem('hstack_hosting_option');
@@ -161,7 +162,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     hostingSkip.addEventListener('click', () => {
-        persistHostingOption('later');
+        persistHostingOption(HOSTING_DEFERRED);
         checkAuthStatus();
     });
 
