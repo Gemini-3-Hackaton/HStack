@@ -8,7 +8,7 @@ interface SetupWizardProps {
 }
 
 export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
-  const [isSavingMode, setIsSavingMode] = useState<string | null>(null);
+  const [savingMode, setSavingMode] = useState<string | null>(null);
 
   const options = [
     {
@@ -35,15 +35,15 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
   ] as const;
 
   const handleSelectMode = async (mode: string) => {
-    if (isSavingMode) return;
+    if (savingMode) return;
 
     try {
-      setIsSavingMode(mode);
+      setSavingMode(mode);
       await invoke('complete_onboarding', { mode });
       onComplete();
     } catch (error) {
       console.error('Failed to save hosting mode:', error);
-      setIsSavingMode(null);
+      setSavingMode(null);
     }
   };
 
@@ -73,13 +73,13 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
           <div className="flex flex-col gap-4">
             {options.map((option) => {
               const Icon = option.icon;
-              const isSaving = isSavingMode === option.mode;
+              const isSaving = savingMode === option.mode;
 
               return (
                 <button
                   key={option.mode}
                   type="button"
-                  disabled={Boolean(isSavingMode)}
+                  disabled={Boolean(savingMode)}
                   onClick={() => handleSelectMode(option.mode)}
                   className="rounded-[1.5rem] bg-[#161616] p-[4px] text-left shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] transition-transform duration-200 hover:scale-[1.01] disabled:cursor-wait disabled:opacity-70"
                 >
