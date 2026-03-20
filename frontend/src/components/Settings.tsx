@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ChangeEvent, type FocusEvent, type KeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X, Plus, Trash2, Database, Globe, Key, Edit2, Cloud, HardDrive, Server } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -223,7 +223,6 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
         const updated = {
             ...settings,
             sync_mode: syncMode,
-            custom_server_url: syncMode === 'CloudCustom' ? settings.custom_server_url : null,
         };
 
         try {
@@ -319,8 +318,8 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                             <EngravedInput
                                                 label="Custom Server URL"
                                                 value={settings.custom_server_url || ""}
-                                                onChange={(e: any) => setSettings({ ...settings, custom_server_url: e.target.value })}
-                                                onBlur={async (e: any) => {
+                                                onChange={(e: ChangeEvent<HTMLInputElement>) => setSettings({ ...settings, custom_server_url: e.target.value })}
+                                                onBlur={async (e: FocusEvent<HTMLInputElement>) => {
                                                     if (!settings) return;
                                                     const trimmed = e.target.value.trim();
                                                     const updated = {
@@ -334,7 +333,7 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                         console.error("Failed to save custom server URL:", err);
                                                     }
                                                 }}
-                                                onKeyDown={(e: any) => {
+                                                onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
                                                     if (e.key === 'Enter') {
                                                         e.currentTarget.blur();
                                                     }
