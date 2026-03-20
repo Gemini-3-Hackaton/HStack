@@ -266,7 +266,7 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
 
                         {/* Scrollable Content Area */}
                         <div className="flex-1 overflow-y-auto no-scrollbar pr-2 pb-2">
-                            {/* Providers Section */}
+                            {/* Hosting & Sync Section */}
                             <section className="mb-8">
                                 <div className="flex items-center justify-between mb-4 px-1">
                                     <h3 className="text-[12px] uppercase tracking-widest font-bold text-[#777] flex items-center gap-2">
