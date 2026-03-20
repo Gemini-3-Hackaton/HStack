@@ -24,11 +24,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const settingsModal = document.getElementById('settings-modal');
     const settingsClose = document.getElementById('settings-close');
     const settingsSave = document.getElementById('settings-save');
+    const hostingSkip = document.getElementById('hosting-skip');
     const hostingWizardOptions = document.querySelectorAll('#hosting-wizard .hosting-option');
     const settingsHostingOptions = document.querySelectorAll('#settings-modal .hosting-option');
 
     let currentUser = JSON.parse(localStorage.getItem('hstack_user'));
     let hostingOption = localStorage.getItem('hstack_hosting_option');
+    if (hostingOption === 'self-hosted') {
+        hostingOption = 'local';
+        localStorage.setItem('hstack_hosting_option', hostingOption);
+    }
     let pendingHostingOption = hostingOption;
     let isLoginMode = true;
 
@@ -122,7 +127,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Authentication Logic ---
     const checkAuthStatus = () => {
-        if (!hostingOption) {
+        const hasHostingPreference = Boolean(hostingOption);
+        const needsHostingWizard = !hasHostingPreference;
+
+        if (needsHostingWizard) {
             authOverlay.classList.add('hidden');
             settingsButton.classList.add('hidden');
             hostingWizard.classList.remove('hidden');
@@ -150,6 +158,11 @@ document.addEventListener('DOMContentLoaded', () => {
             persistHostingOption(option.dataset.hostingOption);
             checkAuthStatus();
         });
+    });
+
+    hostingSkip.addEventListener('click', () => {
+        persistHostingOption('later');
+        checkAuthStatus();
     });
 
     settingsHostingOptions.forEach((option) => {

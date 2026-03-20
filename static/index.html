@@ -13,13 +13,8 @@
     <main class="app-container">
         <!-- Header -->
         <header class="user-header">
-            <div class="user-header-top">
-                <div>
-                    <h1>Hi Antoine,</h1>
-                    <p class="subtitle">Here is your stack.</p>
-                </div>
-                <button type="button" id="settings-button" class="settings-button hidden">Settings</button>
-            </div>
+            <h1>Hi Antoine,</h1>
+            <p class="subtitle">Here is your stack.</p>
         </header>
 
         <!-- Stack (Task List) -->
@@ -57,6 +52,8 @@
         </div>
     </main>
 
+    <button type="button" id="settings-button" class="settings-button floating-settings-button hidden">Hosting</button>
+
     <!-- Authentication Overlay -->
     <div id="auth-overlay" class="auth-overlay">
         <div class="auth-card">
@@ -81,18 +78,19 @@
     <div id="hosting-wizard" class="auth-overlay hidden">
         <div class="auth-card hosting-card">
             <span class="section-tag">Setup</span>
-            <h2>Choose your hosting</h2>
-            <p class="hosting-copy">Pick how you want to run HStack. You can change this later from Settings.</p>
+            <h2>Get started your way</h2>
+            <p class="hosting-copy">Choose the simplest setup for now, or continue and decide later from Hosting settings.</p>
             <div class="hosting-options" id="hosting-wizard-options">
                 <button type="button" class="hosting-option" data-hosting-option="managed">
-                    <span class="hosting-option-title">Hosted by HStack</span>
-                    <span class="hosting-option-copy">Start quickly with the managed experience.</span>
+                    <span class="hosting-option-title">Use HStack Cloud</span>
+                    <span class="hosting-option-copy">Recommended for most people. Start quickly with the managed setup.</span>
                 </button>
-                <button type="button" class="hosting-option" data-hosting-option="self-hosted">
-                    <span class="hosting-option-title">Self-hosted</span>
-                    <span class="hosting-option-copy">Bring your own setup and keep everything local.</span>
+                <button type="button" class="hosting-option" data-hosting-option="local">
+                    <span class="hosting-option-title">Use this device</span>
+                    <span class="hosting-option-copy">Keep HStack running locally on this machine.</span>
                 </button>
             </div>
+            <button type="button" id="hosting-skip" class="hosting-skip-button">Continue for now</button>
         </div>
     </div>
 
@@ -108,12 +106,12 @@
             <p class="hosting-copy">Update where your HStack instance runs.</p>
             <div class="hosting-options" id="settings-hosting-options">
                 <button type="button" class="hosting-option" data-hosting-option="managed">
-                    <span class="hosting-option-title">Hosted by HStack</span>
-                    <span class="hosting-option-copy">Start quickly with the managed experience.</span>
+                    <span class="hosting-option-title">Use HStack Cloud</span>
+                    <span class="hosting-option-copy">Recommended for most people. Start quickly with the managed setup.</span>
                 </button>
-                <button type="button" class="hosting-option" data-hosting-option="self-hosted">
-                    <span class="hosting-option-title">Self-hosted</span>
-                    <span class="hosting-option-copy">Bring your own setup and keep everything local.</span>
+                <button type="button" class="hosting-option" data-hosting-option="local">
+                    <span class="hosting-option-title">Use this device</span>
+                    <span class="hosting-option-copy">Keep HStack running locally on this machine.</span>
                 </button>
             </div>
             <button type="button" id="settings-save" class="auth-btn">Save changes</button>

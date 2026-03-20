@@ -53,13 +53,6 @@ body {
     flex-shrink: 0;
 }
 
-.user-header-top {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-}
-
 .user-header h1 {
     font-size: 28px;
     font-weight: 600;
@@ -87,6 +80,13 @@ body {
 .settings-button:hover {
     background: rgba(255,255,255,0.05);
     border-color: rgba(255,255,255,0.28);
+}
+
+.floating-settings-button {
+    position: fixed;
+    top: 28px;
+    right: 28px;
+    z-index: 50;
 }
 
 .hidden {
@@ -524,6 +524,22 @@ body {
     color: var(--text-secondary);
     font-size: 13px;
     line-height: 1.5;
+}
+
+.hosting-skip-button {
+    align-self: center;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    margin-top: 18px;
+    transition: color 0.2s ease;
+}
+
+.hosting-skip-button:hover {
+    color: var(--text-primary);
 }
 
 .modal {
