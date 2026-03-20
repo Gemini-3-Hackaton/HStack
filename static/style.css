@@ -2,6 +2,7 @@
     --bg-main: #0B0C0E;
     --bg-surface: #1A1A1E;
     --bg-input: #23242A;
+    --bg-hover: #202127;
     --text-primary: #F2F2F2;
     --text-secondary: #8A8F98;
     --border-color: #ffffff1a;
@@ -79,7 +80,7 @@ body {
 }
 
 .settings-button:hover {
-    background: #202127;
+    background: var(--bg-hover);
     border-color: rgba(255,255,255,0.18);
     transform: translateY(-1px);
     box-shadow: 0 12px 28px rgba(0,0,0,0.32);
@@ -515,7 +516,7 @@ body {
 
 .hosting-option:hover {
     border-color: rgba(255,255,255,0.15);
-    background: #202127;
+    background: var(--bg-hover);
     transform: translateY(-2px);
     box-shadow: 0 6px 16px rgba(0,0,0,0.28);
 }
@@ -591,7 +592,7 @@ body {
 
 .modal-close:hover {
     color: var(--text-primary);
-    background: #202127;
+    background: var(--bg-hover);
     border-color: rgba(255,255,255,0.18);
 }
 
