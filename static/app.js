@@ -19,8 +19,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatInput = document.getElementById('chat-input');
     const chatSubmit = document.getElementById('chat-submit');
     const userHeader = document.querySelector('.user-header h1');
+    const settingsButton = document.getElementById('settings-button');
+    const hostingWizard = document.getElementById('hosting-wizard');
+    const settingsModal = document.getElementById('settings-modal');
+    const settingsClose = document.getElementById('settings-close');
+    const settingsSave = document.getElementById('settings-save');
+    const hostingWizardOptions = document.querySelectorAll('#hosting-wizard .hosting-option');
+    const settingsHostingOptions = document.querySelectorAll('#settings-modal .hosting-option');
 
     let currentUser = JSON.parse(localStorage.getItem('hstack_user'));
+    let hostingOption = localStorage.getItem('hstack_hosting_option');
+    let pendingHostingOption = hostingOption;
     let isLoginMode = true;
 
     // ── Commute Alert Polling (defined early so checkAuthStatus can reference) ──
@@ -85,18 +94,96 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    const syncHostingSelection = (options, selectedOption) => {
+        options.forEach((option) => {
+            const isSelected = option.dataset.hostingOption === selectedOption;
+            option.classList.toggle('selected', isSelected);
+            option.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+        });
+    };
+
+    const updateHostingUI = () => {
+        syncHostingSelection(hostingWizardOptions, hostingOption);
+        syncHostingSelection(settingsHostingOptions, pendingHostingOption || hostingOption);
+    };
+
+    const persistHostingOption = (nextHostingOption) => {
+        hostingOption = nextHostingOption;
+        pendingHostingOption = nextHostingOption;
+        localStorage.setItem('hstack_hosting_option', nextHostingOption);
+        updateHostingUI();
+    };
+
+    const closeSettingsModal = () => {
+        settingsModal.classList.add('hidden');
+        pendingHostingOption = hostingOption;
+        updateHostingUI();
+    };
+
     // --- Authentication Logic ---
     const checkAuthStatus = () => {
+        if (!hostingOption) {
+            authOverlay.classList.add('hidden');
+            settingsButton.classList.add('hidden');
+            hostingWizard.classList.remove('hidden');
+            stopCommutePolling();
+            return;
+        }
+
+        hostingWizard.classList.add('hidden');
+
         if (currentUser) {
             authOverlay.classList.add('hidden');
+            settingsButton.classList.remove('hidden');
             userHeader.textContent = `Hi ${currentUser.first_name},`;
             loadTasks();
             startCommutePolling();
         } else {
             authOverlay.classList.remove('hidden');
+            settingsButton.classList.add('hidden');
             stopCommutePolling();
         }
     };
+
+    hostingWizardOptions.forEach((option) => {
+        option.addEventListener('click', () => {
+            persistHostingOption(option.dataset.hostingOption);
+            checkAuthStatus();
+        });
+    });
+
+    settingsHostingOptions.forEach((option) => {
+        option.addEventListener('click', () => {
+            pendingHostingOption = option.dataset.hostingOption;
+            updateHostingUI();
+        });
+    });
+
+    settingsButton.addEventListener('click', () => {
+        pendingHostingOption = hostingOption;
+        updateHostingUI();
+        settingsModal.classList.remove('hidden');
+    });
+
+    settingsClose.addEventListener('click', closeSettingsModal);
+
+    settingsModal.addEventListener('click', (event) => {
+        if (event.target === settingsModal) {
+            closeSettingsModal();
+        }
+    });
+
+    settingsSave.addEventListener('click', () => {
+        if (!pendingHostingOption) return;
+        persistHostingOption(pendingHostingOption);
+        closeSettingsModal();
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && !settingsModal.classList.contains('hidden')) {
+            closeSettingsModal();
+        }
+    });
 
     authToggleLink.addEventListener('click', (e) => {
         e.preventDefault();
@@ -434,5 +521,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // ── Commute Alert Polling ─────────────────────────────
 
     // Boot app
+    updateHostingUI();
     checkAuthStatus();
 });

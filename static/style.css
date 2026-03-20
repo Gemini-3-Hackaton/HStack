@@ -53,6 +53,13 @@ body {
     flex-shrink: 0;
 }
 
+.user-header-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
 .user-header h1 {
     font-size: 28px;
     font-weight: 600;
@@ -63,6 +70,27 @@ body {
     color: var(--text-secondary);
     margin-top: 6px;
     font-size: 14px;
+}
+
+.settings-button {
+    background: transparent;
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.settings-button:hover {
+    background: rgba(255,255,255,0.05);
+    border-color: rgba(255,255,255,0.28);
+}
+
+.hidden {
+    display: none !important;
 }
 
 /* The Stack */
@@ -426,6 +454,115 @@ body {
     color: var(--text-primary);
     text-decoration: none;
     font-weight: 500;
+}
+
+.section-tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(94, 106, 210, 0.12);
+    border: 1px solid rgba(94, 106, 210, 0.25);
+    color: #A9B4FF;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    margin-bottom: 16px;
+}
+
+.hosting-card {
+    max-width: 420px;
+    text-align: left;
+}
+
+.hosting-copy {
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-bottom: 24px;
+}
+
+.hosting-options {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.hosting-option {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    color: var(--text-primary);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+}
+
+.hosting-option:hover {
+    border-color: rgba(255,255,255,0.28);
+    transform: translateY(-1px);
+}
+
+.hosting-option.selected {
+    border-color: var(--accent-blue);
+    background: rgba(94, 106, 210, 0.14);
+    box-shadow: 0 0 0 1px rgba(94, 106, 210, 0.2);
+}
+
+.hosting-option-title {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.hosting-option-copy {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.modal {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(11, 12, 14, 0.7);
+    backdrop-filter: blur(6px);
+    z-index: 1100;
+    padding: 20px;
+}
+
+.modal-card {
+    width: 100%;
+    max-width: 420px;
+    text-align: left;
+}
+
+.settings-modal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.modal-close {
+    background: transparent;
+    color: var(--text-secondary);
+    border: none;
+    font-size: 18px;
+    cursor: pointer;
+    padding: 4px;
+    line-height: 1;
+}
+
+.modal-close:hover {
+    color: var(--text-primary);
 }
 
 /* Pearl Fallback */
