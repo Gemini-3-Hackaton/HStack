@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { SyncProvider, useSync, TaskModel } from "./SyncEngine";
-import { Send, ChevronDown, Plus, Trash2, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, X } from "lucide-react";
+import { Send, ChevronDown, Plus, Trash2, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { clsx, type ClassValue } from "clsx";
@@ -586,7 +586,7 @@ function App() {
     const { tasks, syncNow, isConnected } = useSync();
     const [inputValue, setInputValue] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
-    const [placeholder, setPlaceholder] = useState("Tell AI to manage your stack...");
+    const placeholder = "Tell AI to manage your stack...";
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [integrations] = useState<string[]>([]);
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -634,9 +634,6 @@ function App() {
             } catch (err) { setInteractionState('ERROR'); setTimeout(() => setInteractionState('IDLE'), 3000); }
         } finally { setIsProcessing(false); if (inputRef.current) inputRef.current.focus(); }
     };
-
-    const clearHistory = () => { setChatHistory([]); setIsHistoryExpanded(false); setInteractionState('IDLE'); };
-    const lastAssistantMsg = [...chatHistory].reverse().find(m => m.role === 'assistant')?.content;
 
     return (
         <main className="app-container w-screen h-screen flex flex-col relative bg-[#080808] rounded-[24px] overflow-hidden border border-white/15 shadow-2xl transition-all duration-300 ease-out">

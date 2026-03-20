@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { X, Plus, Trash2, Database, Globe, Key, Edit2 } from "lucide-react";
+import { X, Plus, Trash2, Database, Globe, Key, Edit2, Cloud, HardDrive, Server } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
@@ -85,7 +85,34 @@ export interface UserSettings {
     local_processing: boolean;
     locale: string | null;
     hour12: boolean | null;
+    sync_mode: 'LocalOnly' | 'CloudOfficial' | 'CloudCustom';
+    custom_server_url: string | null;
+    onboarding_complete: boolean;
 }
+
+const HOSTING_OPTIONS = [
+    {
+        mode: 'LocalOnly' as const,
+        title: 'Local Only',
+        description: 'Keep everything on this device with no sync dependency.',
+        hint: 'Best for privacy-first personal use.',
+        icon: HardDrive,
+    },
+    {
+        mode: 'CloudOfficial' as const,
+        title: 'Official Cloud',
+        description: 'Use the managed HStack cloud for sync across devices.',
+        hint: 'Fastest setup for multi-device access.',
+        icon: Cloud,
+    },
+    {
+        mode: 'CloudCustom' as const,
+        title: 'Self-Hosted',
+        description: 'Connect this app to your own HStack Lite deployment.',
+        hint: 'Bring your own server endpoint.',
+        icon: Server,
+    }
+];
 
 interface SettingsProps {
     isOpen: boolean;
@@ -116,6 +143,11 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
         } catch (err) {
             console.error("Failed to load settings:", err);
         }
+    };
+
+    const persistSettings = async (updated: UserSettings) => {
+        await invoke("save_settings", { settings: updated });
+        setSettings(updated);
     };
 
     const handleEditProvider = (p: SavedProvider) => {
@@ -180,10 +212,24 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
         if (!settings) return;
         const updated = { ...settings, default_provider_id: id };
         try {
-            await invoke("save_settings", { settings: updated });
-            setSettings(updated);
+            await persistSettings(updated);
         } catch (err) {
             console.error("Failed to set default:", err);
+        }
+    };
+
+    const handleSyncModeChange = async (syncMode: UserSettings["sync_mode"]) => {
+        if (!settings || settings.sync_mode === syncMode) return;
+        const updated = {
+            ...settings,
+            sync_mode: syncMode,
+            custom_server_url: syncMode === 'CloudCustom' ? settings.custom_server_url : null,
+        };
+
+        try {
+            await persistSettings(updated);
+        } catch (err) {
+            console.error("Failed to update hosting mode:", err);
         }
     };
 
@@ -220,6 +266,88 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
 
                         {/* Scrollable Content Area */}
                         <div className="flex-1 overflow-y-auto no-scrollbar pr-2 pb-2">
+                            {/* Providers Section */}
+                            <section className="mb-8">
+                                <div className="flex items-center justify-between mb-4 px-1">
+                                    <h3 className="text-[12px] uppercase tracking-widest font-bold text-[#777] flex items-center gap-2">
+                                        Hosting & Sync
+                                    </h3>
+                                </div>
+
+                                <div className="flex flex-col gap-3">
+                                    {settings && HOSTING_OPTIONS.map(option => {
+                                        const isSelected = settings.sync_mode === option.mode;
+                                        const Icon = option.icon;
+
+                                        return (
+                                            <button
+                                                key={option.mode}
+                                                type="button"
+                                                onClick={() => handleSyncModeChange(option.mode)}
+                                                className="text-left"
+                                            >
+                                                <PhysicalWrapper
+                                                    innerClass="p-4 flex items-start gap-4 transition-colors"
+                                                    shaderColors={isSelected ? THEMES.emerald : THEMES.default}
+                                                >
+                                                    <div className={cn(
+                                                        "relative z-20 w-11 h-11 rounded-2xl border flex items-center justify-center shrink-0 transition-colors",
+                                                        isSelected ? "border-white/10 bg-white/10 text-[#D1D1D1]" : "border-white/5 bg-black/20 text-[#777]"
+                                                    )}>
+                                                        <Icon size={18} />
+                                                    </div>
+                                                    <div className="relative z-20 flex-1 min-w-0">
+                                                        <div className="flex items-center justify-between gap-3">
+                                                            <span className="text-[15px] font-medium text-[#D1D1D1]">{option.title}</span>
+                                                            <span className={cn(
+                                                                "text-[9px] font-bold uppercase tracking-[0.22em]",
+                                                                isSelected ? "text-[#D1D1D1]" : "text-[#555]"
+                                                            )}>
+                                                                {isSelected ? 'Selected' : 'Available'}
+                                                            </span>
+                                                        </div>
+                                                        <p className="mt-1 text-[12px] text-[#8A8A8A] leading-relaxed">{option.description}</p>
+                                                        <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-[#555]">{option.hint}</p>
+                                                    </div>
+                                                </PhysicalWrapper>
+                                            </button>
+                                        );
+                                    })}
+
+                                    {settings?.sync_mode === 'CloudCustom' && (
+                                        <div className="pt-2">
+                                            <EngravedInput
+                                                label="Custom Server URL"
+                                                value={settings.custom_server_url || ""}
+                                                onChange={(e: any) => setSettings({ ...settings, custom_server_url: e.target.value })}
+                                                onBlur={async (e: any) => {
+                                                    if (!settings) return;
+                                                    const trimmed = e.target.value.trim();
+                                                    const updated = {
+                                                        ...settings,
+                                                        custom_server_url: trimmed || null,
+                                                    };
+
+                                                    try {
+                                                        await persistSettings(updated);
+                                                    } catch (err) {
+                                                        console.error("Failed to save custom server URL:", err);
+                                                    }
+                                                }}
+                                                onKeyDown={(e: any) => {
+                                                    if (e.key === 'Enter') {
+                                                        e.currentTarget.blur();
+                                                    }
+                                                }}
+                                                placeholder="https://your-hstack-lite.example.com"
+                                                className="font-mono"
+                                            />
+                                            <p className="mt-2 px-1 text-[10px] text-[#555]">Saved when the field loses focus. Point this to your HStack Lite base URL.</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </section>
+
                             {/* Providers Section */}
                             <section className="mb-8">
                                 <div className="flex items-center justify-between mb-4 px-1">
