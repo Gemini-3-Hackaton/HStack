@@ -3,7 +3,10 @@ mod secure_store;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
 use serde_json::{json, Value};
-use hstack_core::provider::{Message, Role, ProviderConfig};
+use hstack_core::error::Error as CoreError;
+use hstack_core::provider::gemini::generate_gemini_content;
+use hstack_core::provider::openai_compat::generate_openai_content;
+use hstack_core::provider::{Message, Role, ProviderConfig, Tool, ToolCall, ToolFunctionCall};
 use hstack_core::chat::{chat_loop, ToolExecutor, ContextRefreshFn};
 use hstack_core::settings::{UserSettings, SavedProvider, SyncMode};
 use hstack_core::ticket::{tool_schemas, Ticket, TicketStatus, TicketPayload};
@@ -12,6 +15,16 @@ use hstack_core::temporal_parser::parse_agent_rrule;
 use secure_store::SecureStore;
 use uuid::Uuid;
 use chrono::{Utc, Local, Datelike};
+use std::collections::HashMap;
+
+const SYNC_TOKEN_KEY: &str = "hstack-sync-token";
+
+#[derive(serde::Serialize)]
+struct SyncSessionInfo {
+    user_id: Option<i64>,
+    user_name: Option<String>,
+    token: Option<String>,
+}
 
 #[tauri::command]
 async fn get_settings(app: AppHandle) -> Result<UserSettings, String> {
@@ -215,30 +228,50 @@ COMMON PATTERNS:
 
 RULES:
 1. Calculate DTSTART in UTC based on the user's relative date and local timezone offset.
-2. Include RRULE only for recurring events (HABIT type).
+2. Any time-bearing ticket may use the `rrule` field. Use `DTSTART:...` for one-time scheduling, and add `RRULE:...` when the ticket repeats.
 3. Separate DTSTART and RRULE with a space.
+
+GROUNDING AND PROVENANCE RULES:
+1. Only use names, dates, places, and facts that appear in the current user message, CURRENT STACK, RECENT ACTIONS, or earlier turns in this session.
+2. Never invent missing specifics. If a ticket update requires a concrete value and the user did not provide it, ask a clarification question unless a planning default below clearly applies.
+3. If the user asks where a fact came from, answer only with grounded provenance. If you inferred something incorrectly, say so plainly instead of claiming the user provided it.
+
+PROACTIVE PLANNING RULES:
+1. HStack should reduce the user's mental load. When the user asks you to \"be smart\", \"handle it\", or otherwise implies they want proactive planning, choose a sensible default instead of bouncing the decision back.
+2. If the user wants a task done before a known dated event, prefer adding or editing the ticket's schedule instead of only writing that constraint in notes.
+3. Default planning time for a one-time task with a date but no explicit time is 10:00 local time.
+4. If the user asks for something before a known dated event and gives no time, schedule it for 10:00 local time on the previous day unless that would already be in the past; if it would be in the past, choose the nearest reasonable future time that still satisfies the request.
+5. When you apply a planning default, mention the assumption briefly in your natural-language response.
+6. If the user mentions a concrete future commitment that affects planning, such as a meeting, workout, yoga session, appointment, dinner, or trip, and it is not already in CURRENT STACK, add it as its own ticket as well as updating the original task when appropriate.
+7. Use EVENT for a specific scheduled commitment like \"yoga from 10 to 12\". Include the date/time in `rrule` or `DTSTART`, and include duration when the user gave a time range.
 
 CRITICAL: TOOL CALLING RULES
 1. ALWAYS use tools for state changes - never just describe what you would do.
 2. Extract parameters EXACTLY from user input - don't invent values.
 3. When editing, only include fields that need to change.
 4. If multiple actions needed, make multiple tool calls.
-4. **IF A TOOL CALL FAILS**: You will see a ⚠️ error message. Read it and try again.
+5. If a request implies a scheduling change, update the ticket's `rrule`/`DTSTART` rather than burying the timing in notes.
+6. **IF A TOOL CALL FAILS**: You will see a ⚠️ error message. Read it, correct the arguments, and retry only if you can improve them.
 
 TICKET TYPES:
-- HABIT: Recurring routines (uses rrule field).
-- TASK: One-off actions or things to do (most common).
-- EVENT: Time-specific appointments with location/context.
+ HABIT: Routines and recurring commitments. Can use `rrule`.
+ TASK: Actions or reminders. Can use `rrule` for one-time or repeating scheduling when the user gives a date/time.
+ EVENT: Time-specific appointments, gatherings, meetings, and calendar-like items. Can use `rrule` for one-time or repeating scheduling.
 
 TOOL EXAMPLES:
 - create_ticket: {{\"type\": \"TASK\", \"title\": \"Walk the dog\", \"rrule\": \"DTSTART:20260320T140000Z\"}}
 - edit_ticket: {{\"task_id\": \"uuid\", \"rrule\": \"DTSTART:20260322T090000Z\"}}
+- edit_ticket: {{\"task_id\": \"uuid\", \"title\": \"Walk the dog (Jimbo)\"}}
+- edit_ticket: {{\"task_id\": \"uuid\", \"rrule\": \"DTSTART:20260326T100000Z\"}}
+- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Yoga\", \"rrule\": \"DTSTART:20260326T100000Z\", \"duration_minutes\": 120}}
 - create_ticket: {{\"type\": \"HABIT\", \"title\": \"Morning workout\", \"rrule\": \"DTSTART:20260320T070000Z RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\"}}
+- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Jimbo birthday party\", \"rrule\": \"DTSTART:20260327T190000Z\"}}
+- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Weekly team standup\", \"rrule\": \"DTSTART:20260324T083000Z RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR\"}}
 
 REMEMBER:
 - NO EMOJIS in titles.
 - Keep titles clean and concise.
-- Date qualifiers (tomorrow, today, Monday) go in scheduled_time, not the title.",
+- Date qualifiers and times belong in `rrule`/`DTSTART`, not in the title.",
         recent_actions_str,
         context_str,
         local_time,
@@ -248,6 +281,422 @@ REMEMBER:
     );
 
     Ok(full_prompt)
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PlannerCommitment {
+    r#type: Option<String>,
+    title: Option<String>,
+    rrule: Option<String>,
+    duration_minutes: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PlannerDependencyImpact {
+    ticket_id: String,
+    title: Option<String>,
+    reason: String,
+    action_required: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PlannerAction {
+    tool: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PlannerPlan {
+    user_goal: String,
+    grounded_facts: Vec<String>,
+    time_constraints: Vec<String>,
+    existing_tickets_relevant: Vec<String>,
+    dependent_tickets_impacted: Vec<PlannerDependencyImpact>,
+    new_commitments_detected: Vec<PlannerCommitment>,
+    proactive_opportunities: Vec<String>,
+    assumptions_to_apply: Vec<String>,
+    tool_actions: Vec<PlannerAction>,
+    user_reply_strategy: String,
+}
+
+async fn build_planner_prompt(app: AppHandle, tools: &[Tool]) -> Result<String, String> {
+    let current_tasks = get_tasks(app.clone()).await.unwrap_or_default();
+    let context_str = serde_json::to_string_pretty(&current_tasks).unwrap_or_else(|_| "[]".to_string());
+
+    let pending_store = match app.store("pending_actions.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Pending actions store failure: {}", e)),
+    };
+    let pending_actions: Vec<SyncAction> = match pending_store.get("pending") {
+        Some(val) => serde_json::from_value(val).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let recent_actions_str = pending_actions.iter()
+        .rev()
+        .take(5)
+        .map(|a| {
+            let title = a.payload.as_ref()
+                .map(|p| p.get_title())
+                .unwrap_or("Unknown");
+            format!("- {:?}: {} ({}) at {}", a.r#type, title, a.entity_type, a.timestamp)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let now = Local::now();
+    let local_time = now.format("%H:%M").to_string();
+    let local_date = now.format("%Y-%m-%d").to_string();
+    let weekday = now.weekday().to_string();
+    let offset = now.offset().to_string();
+    let tools_str = serde_json::to_string_pretty(tools).unwrap_or_else(|_| "[]".to_string());
+
+    Ok(format!(
+"You are the HStack planning engine. Output ONLY valid JSON. Do not output prose, markdown, or code fences.
+
+USER CONTEXT:
+- Local Time: {}
+- Local Date: {}
+- Today is {}
+- UTC Offset: {}
+
+CURRENT STACK:
+{}
+
+RECENT ACTIONS:
+{}
+
+AVAILABLE TOOLS:
+{}
+
+Return exactly this JSON shape:
+{{
+  \"user_goal\": \"string\",
+  \"grounded_facts\": [\"string\"],
+  \"time_constraints\": [\"string\"],
+  \"existing_tickets_relevant\": [\"string\"],
+    \"dependent_tickets_impacted\": [{{
+        \"ticket_id\": \"string\",
+        \"title\": \"string|null\",
+        \"reason\": \"string\",
+        \"action_required\": true
+    }}],
+  \"new_commitments_detected\": [{{
+    \"type\": \"EVENT|TASK|HABIT|null\",
+    \"title\": \"string|null\",
+    \"rrule\": \"string|null\",
+    \"duration_minutes\": 0
+  }}],
+  \"proactive_opportunities\": [\"string\"],
+  \"assumptions_to_apply\": [\"string\"],
+  \"tool_actions\": [{{
+    \"tool\": \"valid tool name\",
+    \"arguments\": {{}}
+  }}],
+  \"user_reply_strategy\": \"string\"
+}}
+
+Planning rules:
+1. Use only grounded facts from the current user message, prior conversation turns, CURRENT STACK, or RECENT ACTIONS.
+2. Never invent names, dates, or provenance.
+3. Prefer proactive planning that reduces the user's mental load.
+4. If a user mentions a concrete future commitment that affects planning and it is not already in CURRENT STACK, include a create_ticket action for it when appropriate.
+5. If a user wants something done before a known dated event, prefer scheduling the task rather than writing the constraint in notes.
+6. Default one-time planning time is 10:00 local when a date is known but no time is given.
+7. If the user gives a blocking time range on that date, schedule around it and add the blocking commitment itself when it is concrete and future-facing.
+8. When moving or rescheduling a dated ticket, inspect CURRENT STACK for dependent tickets whose purpose or timing is anchored to that ticket, person, or occasion, and record them in dependent_tickets_impacted.
+9. If a dependent ticket would become misaligned after the change, set action_required to true and include the necessary edit_ticket action in tool_actions.
+10. tool_actions must use only AVAILABLE TOOLS and arguments must match the tool schema exactly.
+11. If no tool action is needed, return an empty tool_actions array.",
+        local_time,
+        local_date,
+        weekday,
+        offset,
+        context_str,
+        recent_actions_str,
+        tools_str,
+    ))
+}
+
+fn extract_first_json_value(content: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(content) {
+        return Some(value);
+    }
+
+    let trimmed = content.trim();
+    if let Some(stripped) = trimmed.strip_prefix("```") {
+        let without_lang = if let Some(newline_idx) = stripped.find('\n') {
+            &stripped[newline_idx + 1..]
+        } else {
+            stripped
+        };
+        if let Some(end_idx) = without_lang.rfind("```") {
+            let candidate = &without_lang[..end_idx].trim();
+            if let Ok(value) = serde_json::from_str::<Value>(candidate) {
+                return Some(value);
+            }
+        }
+    }
+
+    if let Some(start) = content.find('{') {
+        if let Some(end) = content.rfind('}') {
+            if end > start {
+                let candidate = &content[start..=end];
+                if let Ok(value) = serde_json::from_str::<Value>(candidate) {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn validate_plan(plan: PlannerPlan, tools: &[Tool]) -> Result<PlannerPlan, String> {
+    if plan.tool_actions.len() > 8 {
+        return Err("planner returned too many actions".to_string());
+    }
+
+    let tool_map: HashMap<&str, &Tool> = tools.iter()
+        .map(|tool| (tool.function.name.as_str(), tool))
+        .collect();
+
+    for action in &plan.tool_actions {
+        let tool = tool_map
+            .get(action.tool.as_str())
+            .ok_or_else(|| format!("planner used unknown tool '{}'", action.tool))?;
+
+        let args = action.arguments.as_object()
+            .ok_or_else(|| format!("planner arguments for '{}' must be a JSON object", action.tool))?;
+
+        let schema = tool.function.parameters.as_object()
+            .ok_or_else(|| format!("tool '{}' has invalid schema", action.tool))?;
+
+        let allowed_keys: Vec<String> = schema.get("properties")
+            .and_then(|v| v.as_object())
+            .map(|props| props.keys().cloned().collect())
+            .unwrap_or_default();
+
+        for key in args.keys() {
+            if !allowed_keys.iter().any(|allowed| allowed == key) {
+                return Err(format!("planner used unsupported argument '{}' for tool '{}'", key, action.tool));
+            }
+        }
+
+        if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
+            for required_key in required.iter().filter_map(|v| v.as_str()) {
+                if !args.contains_key(required_key) {
+                    return Err(format!("planner omitted required argument '{}' for tool '{}'", required_key, action.tool));
+                }
+            }
+        }
+
+        if action.tool == "create_ticket" {
+            let ticket_type = args.get("type").and_then(Value::as_str).unwrap_or_default();
+            let has_duration = args.get("duration_minutes").and_then(Value::as_i64).is_some();
+            let has_schedule = args.get("rrule").and_then(Value::as_str).is_some();
+
+            if ticket_type == "EVENT" && has_duration && !has_schedule {
+                return Err("planner created a timed EVENT without an rrule/DTSTART schedule".to_string());
+            }
+        }
+    }
+
+    for commitment in &plan.new_commitments_detected {
+        let Some(title) = commitment.title.as_deref() else {
+            continue;
+        };
+
+        let matching_create = plan.tool_actions.iter().find(|action| {
+            action.tool == "create_ticket"
+                && action.arguments.get("title").and_then(Value::as_str)
+                    .map(|candidate| candidate.eq_ignore_ascii_case(title))
+                    .unwrap_or(false)
+        });
+
+        if commitment.rrule.is_some() || commitment.duration_minutes.is_some() || commitment.r#type.is_some() {
+            let action = matching_create.ok_or_else(|| {
+                format!("planner detected commitment '{}' but did not create a matching ticket action", title)
+            })?;
+
+            if let Some(expected_type) = commitment.r#type.as_deref() {
+                let actual_type = action.arguments.get("type").and_then(Value::as_str);
+                if actual_type != Some(expected_type) {
+                    return Err(format!(
+                        "planner commitment '{}' expected type '{}' but create_ticket used '{:?}'",
+                        title,
+                        expected_type,
+                        actual_type
+                    ));
+                }
+            }
+
+            if let Some(expected_rrule) = commitment.rrule.as_deref() {
+                let actual_rrule = action.arguments.get("rrule").and_then(Value::as_str);
+                if actual_rrule != Some(expected_rrule) {
+                    return Err(format!(
+                        "planner commitment '{}' expected schedule '{}' but create_ticket used '{:?}'",
+                        title,
+                        expected_rrule,
+                        actual_rrule
+                    ));
+                }
+            }
+
+            if let Some(expected_duration) = commitment.duration_minutes {
+                let actual_duration = action.arguments.get("duration_minutes").and_then(Value::as_i64);
+                if actual_duration != Some(expected_duration) {
+                    return Err(format!(
+                        "planner commitment '{}' expected duration '{}' but create_ticket used '{:?}'",
+                        title,
+                        expected_duration,
+                        actual_duration
+                    ));
+                }
+            }
+        }
+    }
+
+    for impact in &plan.dependent_tickets_impacted {
+        if !impact.action_required {
+            continue;
+        }
+
+        let matching_edit = plan.tool_actions.iter().find(|action| {
+            action.tool == "edit_ticket"
+                && action.arguments.get("task_id").and_then(Value::as_str) == Some(impact.ticket_id.as_str())
+        });
+
+        if matching_edit.is_none() {
+            return Err(format!(
+                "planner marked dependent ticket '{}' as requiring action but did not include a matching edit_ticket action",
+                impact.ticket_id
+            ));
+        }
+    }
+
+    Ok(plan)
+}
+
+async fn generate_model_message(
+    config: &ProviderConfig,
+    messages: &[Message],
+    tools: Option<&[Tool]>,
+) -> Result<Message, CoreError> {
+    match config.kind {
+        hstack_core::provider::ProviderKind::OpenAiCompatible => generate_openai_content(config, messages, tools).await,
+        hstack_core::provider::ProviderKind::Gemini => generate_gemini_content(config, messages, tools).await,
+    }
+}
+
+async fn plan_actions(
+    app: AppHandle,
+    config: &ProviderConfig,
+    history: &[Message],
+    user_message: &str,
+    tools: &[Tool],
+) -> Result<Option<PlannerPlan>, String> {
+    let planner_prompt = build_planner_prompt(app, tools).await?;
+    let mut planner_messages = vec![Message {
+        role: Role::System,
+        content: Some(planner_prompt),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    }];
+
+    let prior_messages: Vec<Message> = history.iter()
+        .filter(|m| m.role != Role::System)
+        .rev()
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    planner_messages.extend(prior_messages);
+    planner_messages.push(Message {
+        role: Role::User,
+        content: Some(user_message.to_string()),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    });
+
+    let planner_response = generate_model_message(config, &planner_messages, None)
+        .await
+        .map_err(|e| format!("planner generation failed: {}", e))?;
+
+    let planner_content = planner_response.content.unwrap_or_default();
+    let Some(json_value) = extract_first_json_value(&planner_content) else {
+        println!("--- PLANNER OUTPUT COULD NOT BE PARSED AS JSON ---\n{}", planner_content);
+        return Ok(None);
+    };
+
+    let parsed: PlannerPlan = match serde_json::from_value(json_value) {
+        Ok(plan) => plan,
+        Err(e) => {
+            println!("--- PLANNER OUTPUT FAILED SCHEMA PARSE: {} ---", e);
+            return Ok(None);
+        }
+    };
+
+    match validate_plan(parsed, tools) {
+        Ok(plan) => Ok(Some(plan)),
+        Err(e) => {
+            println!("--- PLANNER OUTPUT FAILED VALIDATION: {} ---", e);
+            Ok(None)
+        }
+    }
+}
+
+fn build_planner_execution_note(plan: &PlannerPlan, tool_results: &[(PlannerAction, String)]) -> String {
+    let dependency_lines = plan.dependent_tickets_impacted.iter()
+        .map(|impact| {
+            let title = impact.title.as_deref().unwrap_or("Unknown");
+            format!(
+                "- {} ({}) => {} [{}]",
+                title,
+                impact.ticket_id,
+                impact.reason,
+                if impact.action_required { "action required" } else { "info only" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let commitments = plan.new_commitments_detected.iter()
+        .filter_map(|commitment| {
+            commitment.title.as_ref().map(|title| {
+                let kind = commitment.r#type.as_deref().unwrap_or("UNKNOWN");
+                let timing = commitment.rrule.as_deref().unwrap_or("no schedule");
+                let duration = commitment.duration_minutes
+                    .map(|value| format!(", duration {} min", value))
+                    .unwrap_or_default();
+                format!("- {} ({}) @ {}{}", title, kind, timing, duration)
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let action_lines = tool_results.iter()
+        .map(|(action, result)| format!("- {} {} => {}", action.tool, action.arguments, result))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "PLANNER SUMMARY:\nGoal: {}\nGrounded facts:\n{}\nTime constraints:\n{}\nRelevant tickets:\n{}\nDependent tickets impacted:\n{}\nDetected commitments:\n{}\nProactive opportunities:\n{}\nAssumptions applied:\n{}\nExecuted actions:\n{}\nReply strategy: {}\nUse this summary and the refreshed stack to answer the user naturally. Do not call tools again.",
+        plan.user_goal,
+        if plan.grounded_facts.is_empty() { "- none".to_string() } else { plan.grounded_facts.iter().map(|fact| format!("- {}", fact)).collect::<Vec<_>>().join("\n") },
+        if plan.time_constraints.is_empty() { "- none".to_string() } else { plan.time_constraints.iter().map(|constraint| format!("- {}", constraint)).collect::<Vec<_>>().join("\n") },
+        if plan.existing_tickets_relevant.is_empty() { "- none".to_string() } else { plan.existing_tickets_relevant.iter().map(|ticket| format!("- {}", ticket)).collect::<Vec<_>>().join("\n") },
+        if dependency_lines.is_empty() { "- none".to_string() } else { dependency_lines },
+        if commitments.is_empty() { "- none".to_string() } else { commitments },
+        if plan.proactive_opportunities.is_empty() { "- none".to_string() } else { plan.proactive_opportunities.iter().map(|item| format!("- {}", item)).collect::<Vec<_>>().join("\n") },
+        if plan.assumptions_to_apply.is_empty() { "- none".to_string() } else { plan.assumptions_to_apply.iter().map(|item| format!("- {}", item)).collect::<Vec<_>>().join("\n") },
+        if action_lines.is_empty() { "- none".to_string() } else { action_lines },
+        plan.user_reply_strategy,
+    )
 }
 
 #[tauri::command]
@@ -293,7 +742,7 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
     
     messages.push(Message {
         role: Role::User,
-        content: Some(message),
+        content: Some(message.clone()),
         tool_calls: None,
         tool_call_id: None,
         name: None,
@@ -628,6 +1077,92 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
         })
     });
 
+    if let Some(plan) = plan_actions(app.clone(), &config, &history, &message, &tools).await? {
+        if !plan.tool_actions.is_empty() {
+            println!("--- EXECUTING VALIDATED PLANNER ACTIONS ---");
+
+            let synthetic_calls: Vec<ToolCall> = plan.tool_actions.iter().map(|action| ToolCall {
+                id: Uuid::new_v4().to_string(),
+                r#type: "function".to_string(),
+                function: ToolFunctionCall {
+                    name: action.tool.clone(),
+                    arguments: serde_json::to_string(&action.arguments).unwrap_or_else(|_| "{}".to_string()),
+                },
+            }).collect();
+
+            messages.push(Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(synthetic_calls.clone()),
+                tool_call_id: None,
+                name: None,
+            });
+
+            let mut tool_results: Vec<(PlannerAction, String)> = Vec::new();
+
+            for (action, call) in plan.tool_actions.iter().cloned().zip(synthetic_calls.iter()) {
+                let result = executor(call.function.name.clone(), action.arguments.clone()).await;
+                let content = match result {
+                    Ok(s) => s,
+                    Err(e) => format!("Error executing tool: {:?}", e),
+                };
+
+                messages.push(Message {
+                    role: Role::Tool,
+                    content: Some(content.clone()),
+                    tool_calls: None,
+                    tool_call_id: Some(call.id.clone()),
+                    name: Some(call.function.name.clone()),
+                });
+
+                tool_results.push((action, content));
+            }
+
+            let planner_note = build_planner_execution_note(&plan, &tool_results);
+            let mut refreshed_prompt = build_system_prompt_with_fresh_context(app.clone()).await?;
+            refreshed_prompt.push_str("\n\n");
+            refreshed_prompt.push_str(&planner_note);
+
+            if let Some(system_msg_idx) = messages.iter().position(|m| m.role == Role::System) {
+                messages[system_msg_idx] = Message {
+                    role: Role::System,
+                    content: Some(refreshed_prompt),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                };
+            } else {
+                messages.insert(0, Message {
+                    role: Role::System,
+                    content: Some(refreshed_prompt),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                });
+            }
+
+            match generate_model_message(&config, &messages, None).await {
+                Ok(response) => {
+                    messages.push(response);
+                    return Ok(messages.split_off(initial_len));
+                }
+                Err(e) => {
+                    messages.push(Message {
+                        role: Role::Assistant,
+                        content: Some(format!(
+                            "I updated your stack based on the plan, but I couldn't generate the final response cleanly: {}",
+                            e
+                        )),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                    return Ok(messages.split_off(initial_len));
+                }
+            }
+        }
+    }
+
     match chat_loop(&config, &mut messages, &tools, &executor, Some(&context_refresh)).await {
         Ok(_) => Ok(messages.split_off(initial_len)),
         Err(e) => {
@@ -678,6 +1213,38 @@ async fn get_user_locale(app: AppHandle) -> Result<(String, bool), String> {
 }
 
 #[tauri::command]
+async fn get_sync_session(app: AppHandle) -> Result<SyncSessionInfo, String> {
+    let settings = get_settings(app).await?;
+    let token = SecureStore::get_key(SYNC_TOKEN_KEY)?;
+
+    Ok(SyncSessionInfo {
+        user_id: settings.sync_user_id,
+        user_name: settings.sync_user_name,
+        token: if token.is_empty() { None } else { Some(token) },
+    })
+}
+
+#[tauri::command]
+async fn save_sync_session(app: AppHandle, user_id: i64, user_name: String, token: String) -> Result<(), String> {
+    SecureStore::set_key(SYNC_TOKEN_KEY, &token)?;
+
+    let mut settings = get_settings(app.clone()).await?;
+    settings.sync_user_id = Some(user_id);
+    settings.sync_user_name = Some(user_name);
+    save_settings(app, settings).await
+}
+
+#[tauri::command]
+async fn clear_sync_session(app: AppHandle) -> Result<(), String> {
+    let _ = SecureStore::delete_key(SYNC_TOKEN_KEY);
+
+    let mut settings = get_settings(app.clone()).await?;
+    settings.sync_user_id = None;
+    settings.sync_user_name = None;
+    save_settings(app, settings).await
+}
+
+#[tauri::command]
 async fn complete_onboarding(app: AppHandle, mode: String) -> Result<(), String> {
     let mut settings = get_settings(app.clone()).await?;
     settings.onboarding_complete = true;
@@ -703,6 +1270,9 @@ pub fn run() {
             get_tasks,
             apply_sync_update,
             get_user_locale,
+            get_sync_session,
+            save_sync_session,
+            clear_sync_session,
             complete_onboarding
         ])
         .build(tauri::generate_context!())

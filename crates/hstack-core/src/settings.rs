@@ -28,6 +28,8 @@ pub struct UserSettings {
     pub hour12: Option<bool>,
     pub sync_mode: SyncMode,
     pub custom_server_url: Option<String>,
+    pub sync_user_id: Option<i64>,
+    pub sync_user_name: Option<String>,
     pub onboarding_complete: bool,
 }
 

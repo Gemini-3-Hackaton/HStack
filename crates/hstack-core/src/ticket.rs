@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{de, Deserialize, Deserializer, Serialize};
+use serde_json::{Map, Value};
 use crate::provider::{Tool, ToolFunction};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
@@ -23,7 +23,7 @@ pub enum TicketStatus {
     Expired,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum TicketPayload {
     Commute {
@@ -66,6 +66,74 @@ pub enum TicketPayload {
     Generic(Value), // Fallback for unknown payloads during migration
 }
 
+impl<'de> Deserialize<'de> for TicketPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(TicketPayload::Generic(Value::deserialize(deserializer)?))
+    }
+}
+
+pub fn decode_ticket_payload_for_type(type_: &TicketType, value: Value) -> Result<TicketPayload, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "ticket payload must be a JSON object".to_string())?;
+
+    match type_ {
+        TicketType::Commute => Ok(TicketPayload::Commute {
+            title: object.get("title").and_then(Value::as_str).unwrap_or("Untitled").to_string(),
+            label: object.get("label").and_then(Value::as_str).map(str::to_string),
+            origin: object.get("origin").and_then(Value::as_str).ok_or_else(|| "commute payload missing origin".to_string())?.to_string(),
+            destination: object.get("destination").and_then(Value::as_str).ok_or_else(|| "commute payload missing destination".to_string())?.to_string(),
+            deadline: object.get("deadline").and_then(Value::as_str).map(str::to_string),
+            days: object.get("days").and_then(Value::as_str).map(str::to_string),
+            live: object.get("live").and_then(Value::as_bool),
+            minutes_remaining: object.get("minutes_remaining").and_then(Value::as_i64),
+            directions: object.get("directions").cloned().filter(|item| !item.is_null()),
+            completed: object.get("completed").and_then(Value::as_bool),
+        }),
+        TicketType::Countdown => Ok(TicketPayload::Countdown {
+            title: object.get("title").and_then(Value::as_str).unwrap_or("Untitled").to_string(),
+            duration_minutes: object.get("duration_minutes").and_then(Value::as_i64).ok_or_else(|| "countdown payload missing duration_minutes".to_string())?,
+            expires_at: object.get("expires_at").and_then(Value::as_str).map(str::to_string),
+        }),
+        TicketType::Event => Ok(TicketPayload::Event {
+            title: object.get("title").and_then(Value::as_str).unwrap_or("Untitled").to_string(),
+            scheduled_time_iso: object.get("scheduled_time_iso").and_then(Value::as_str).map(str::to_string),
+            rrule: object.get("rrule").and_then(Value::as_str).map(str::to_string),
+            duration_minutes: object.get("duration_minutes").and_then(Value::as_i64),
+            completed: object.get("completed").and_then(Value::as_bool),
+        }),
+        TicketType::Habit => Ok(TicketPayload::Habit {
+            title: object.get("title").and_then(Value::as_str).unwrap_or("Untitled").to_string(),
+            scheduled_time_iso: object.get("scheduled_time_iso").and_then(Value::as_str).map(str::to_string),
+            rrule: object.get("rrule").and_then(Value::as_str).map(str::to_string),
+            completed: object.get("completed").and_then(Value::as_bool),
+        }),
+        TicketType::Task => Ok(TicketPayload::Task {
+            title: object.get("title").and_then(Value::as_str).unwrap_or("Untitled").to_string(),
+            scheduled_time_iso: object.get("scheduled_time_iso").and_then(Value::as_str).map(str::to_string),
+            rrule: object.get("rrule").and_then(Value::as_str).map(str::to_string),
+            duration_minutes: object.get("duration_minutes").and_then(Value::as_i64),
+            completed: object.get("completed").and_then(Value::as_bool),
+        }),
+    }
+}
+
+#[derive(Deserialize)]
+struct RawTicket {
+    id: String,
+    #[serde(rename = "type")]
+    r#type: TicketType,
+    status: TicketStatus,
+    payload: Value,
+    notes: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    title: String,
+}
+
 impl TicketPayload {
     pub fn get_title(&self) -> &str {
         match self {
@@ -92,9 +160,132 @@ impl TicketPayload {
             }
         }
     }
+
+    pub fn apply_partial_update(&mut self, updates: &Map<String, Value>) {
+        match self {
+            TicketPayload::Commute {
+                title,
+                label,
+                origin,
+                destination,
+                deadline,
+                days,
+                live,
+                minutes_remaining,
+                directions,
+                completed,
+            } => {
+                apply_string_field(updates, "title", title);
+                apply_option_string_field(updates, "label", label);
+                apply_string_field(updates, "origin", origin);
+                apply_string_field(updates, "destination", destination);
+                apply_option_string_field(updates, "deadline", deadline);
+                apply_option_string_field(updates, "days", days);
+                apply_option_bool_field(updates, "live", live);
+                apply_option_i64_field(updates, "minutes_remaining", minutes_remaining);
+                apply_option_value_field(updates, "directions", directions);
+                apply_option_bool_field(updates, "completed", completed);
+            }
+            TicketPayload::Countdown {
+                title,
+                duration_minutes,
+                expires_at,
+            } => {
+                apply_string_field(updates, "title", title);
+                apply_i64_field(updates, "duration_minutes", duration_minutes);
+                apply_option_string_field(updates, "expires_at", expires_at);
+            }
+            TicketPayload::Event {
+                title,
+                scheduled_time_iso,
+                rrule,
+                duration_minutes,
+                completed,
+            } => {
+                apply_string_field(updates, "title", title);
+                apply_option_string_field(updates, "scheduled_time_iso", scheduled_time_iso);
+                apply_option_string_field(updates, "rrule", rrule);
+                apply_option_i64_field(updates, "duration_minutes", duration_minutes);
+                apply_option_bool_field(updates, "completed", completed);
+            }
+            TicketPayload::Habit {
+                title,
+                scheduled_time_iso,
+                rrule,
+                completed,
+            } => {
+                apply_string_field(updates, "title", title);
+                apply_option_string_field(updates, "scheduled_time_iso", scheduled_time_iso);
+                apply_option_string_field(updates, "rrule", rrule);
+                apply_option_bool_field(updates, "completed", completed);
+            }
+            TicketPayload::Task {
+                title,
+                scheduled_time_iso,
+                rrule,
+                duration_minutes,
+                completed,
+            } => {
+                apply_string_field(updates, "title", title);
+                apply_option_string_field(updates, "scheduled_time_iso", scheduled_time_iso);
+                apply_option_string_field(updates, "rrule", rrule);
+                apply_option_i64_field(updates, "duration_minutes", duration_minutes);
+                apply_option_bool_field(updates, "completed", completed);
+            }
+            TicketPayload::Generic(value) => {
+                if let Some(object) = value.as_object_mut() {
+                    for (key, field_value) in updates {
+                        object.insert(key.clone(), field_value.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn matches_partial_update(&self, updates: &Map<String, Value>) -> bool {
+        let mut projected = self.clone();
+        projected.apply_partial_update(updates);
+        &projected == self
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn apply_string_field(updates: &Map<String, Value>, key: &str, target: &mut String) {
+    if let Some(value) = updates.get(key).and_then(Value::as_str) {
+        *target = value.to_string();
+    }
+}
+
+fn apply_option_string_field(updates: &Map<String, Value>, key: &str, target: &mut Option<String>) {
+    if let Some(value) = updates.get(key) {
+        *target = value.as_str().map(|item| item.to_string());
+    }
+}
+
+fn apply_i64_field(updates: &Map<String, Value>, key: &str, target: &mut i64) {
+    if let Some(value) = updates.get(key).and_then(Value::as_i64) {
+        *target = value;
+    }
+}
+
+fn apply_option_i64_field(updates: &Map<String, Value>, key: &str, target: &mut Option<i64>) {
+    if let Some(value) = updates.get(key) {
+        *target = value.as_i64();
+    }
+}
+
+fn apply_option_bool_field(updates: &Map<String, Value>, key: &str, target: &mut Option<bool>) {
+    if let Some(value) = updates.get(key) {
+        *target = value.as_bool();
+    }
+}
+
+fn apply_option_value_field(updates: &Map<String, Value>, key: &str, target: &mut Option<Value>) {
+    if let Some(value) = updates.get(key) {
+        *target = if value.is_null() { None } else { Some(value.clone()) };
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Ticket {
     pub id: String,
     pub title: String,
@@ -104,6 +295,28 @@ pub struct Ticket {
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl<'de> Deserialize<'de> for Ticket {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawTicket::deserialize(deserializer)?;
+        let payload = decode_ticket_payload_for_type(&raw.r#type, raw.payload)
+            .map_err(de::Error::custom)?;
+
+        Ok(Ticket {
+            id: raw.id,
+            title: raw.title,
+            r#type: raw.r#type,
+            status: raw.status,
+            payload,
+            notes: raw.notes,
+            created_at: raw.created_at,
+            updated_at: raw.updated_at,
+        })
+    }
 }
 
 impl Ticket {
@@ -122,13 +335,93 @@ impl Ticket {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{decode_ticket_payload_for_type, Ticket, TicketPayload, TicketStatus, TicketType};
+
+    #[test]
+    fn decodes_event_payload_from_explicit_ticket_type() {
+        let payload = decode_ticket_payload_for_type(&TicketType::Event, serde_json::json!({
+            "title": "Yoga",
+            "duration_minutes": 60
+        }))
+        .expect("payload should decode");
+
+        match payload {
+            TicketPayload::Event { title, duration_minutes, scheduled_time_iso, rrule, completed } => {
+                assert_eq!(title, "Yoga");
+                assert_eq!(duration_minutes, Some(60));
+                assert_eq!(scheduled_time_iso, None);
+                assert_eq!(rrule, None);
+                assert_eq!(completed, None);
+            }
+            other => panic!("expected event payload, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decodes_countdown_payload_from_explicit_ticket_type() {
+        let payload = decode_ticket_payload_for_type(&TicketType::Countdown, serde_json::json!({
+            "title": "Refactor auth",
+            "duration_minutes": 45,
+            "expires_at": "2026-03-20T22:00:00+00:00"
+        }))
+        .expect("countdown payload should decode");
+
+        match payload {
+            TicketPayload::Countdown {
+                title,
+                duration_minutes,
+                expires_at,
+            } => {
+                assert_eq!(title, "Refactor auth");
+                assert_eq!(duration_minutes, 45);
+                assert_eq!(expires_at.as_deref(), Some("2026-03-20T22:00:00+00:00"));
+            }
+            other => panic!("expected countdown payload, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn deserializes_ticket_using_its_type_discriminator() {
+        let ticket: Ticket = serde_json::from_value(serde_json::json!({
+            "id": "ticket-1",
+            "type": "EVENT",
+            "status": "idle",
+            "payload": {
+                "title": "Yoga",
+                "scheduled_time_iso": "2026-03-26T09:00:00+00:00",
+                "duration_minutes": 60,
+                "rrule": null,
+                "completed": false
+            },
+            "notes": null,
+            "created_at": "2026-03-20T22:00:00+00:00",
+            "updated_at": "2026-03-20T22:00:00+00:00",
+            "title": "Yoga"
+        }))
+        .expect("ticket should deserialize");
+
+        assert_eq!(ticket.r#type, TicketType::Event);
+        assert_eq!(ticket.status, TicketStatus::Idle);
+        match ticket.payload {
+            TicketPayload::Event { title, scheduled_time_iso, duration_minutes, .. } => {
+                assert_eq!(title, "Yoga");
+                assert_eq!(scheduled_time_iso.as_deref(), Some("2026-03-26T09:00:00+00:00"));
+                assert_eq!(duration_minutes, Some(60));
+            }
+            other => panic!("expected event payload, got {:?}", other),
+        }
+    }
+}
+
 pub fn tool_schemas() -> Vec<Tool> {
     vec![
         Tool {
             r#type: "function".to_string(),
             function: ToolFunction {
                 name: "create_ticket".to_string(),
-                description: "Create a new ticket in the user's stack. Must specify the type of ticket (HABIT, EVENT, or TASK) and the title payload.".to_string(),
+                description: "Create a new ticket in the user's stack. Must specify the type of ticket (HABIT, EVENT, or TASK) and the title payload. Any of these ticket types may include an RRULE/DTSTART schedule when the user gives timing information.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -146,7 +439,7 @@ pub fn tool_schemas() -> Vec<Tool> {
                         },
                         "rrule": {
                             "type": "string",
-                            "description": "Optional: RRULE (iCalendar RFC 5545) for scheduling. Format: 'DTSTART:YYYYMMDDTHHMMSS' for one-time, or 'DTSTART:YYYYMMDDTHHMMSS RRULE:FREQ=WEEKLY;BYDAY=MO' for recurring. Examples: DTSTART:20260320T090000 (tomorrow 9am), DTSTART:20260324T090000 RRULE:FREQ=WEEKLY;BYDAY=MO (every Monday)"
+                            "description": "Optional: RFC 5545 scheduling string for any time-bearing ticket type. Use 'DTSTART:YYYYMMDDTHHMMSS' for a one-time scheduled ticket, or 'DTSTART:YYYYMMDDTHHMMSS RRULE:FREQ=WEEKLY;BYDAY=MO' for a recurring ticket. Examples: DTSTART:20260320T090000Z (tomorrow 9am), DTSTART:20260324T090000Z RRULE:FREQ=WEEKLY;BYDAY=MO (every Monday)"
                         },
                         "duration_minutes": {
                             "type": "integer",
@@ -189,7 +482,7 @@ pub fn tool_schemas() -> Vec<Tool> {
             r#type: "function".to_string(),
             function: ToolFunction {
                 name: "edit_ticket".to_string(),
-                description: "Edit an existing ticket in the user's stack. You can change its type, title, or timing.".to_string(),
+                description: "Edit an existing ticket in the user's stack. You can change its type, title, notes, duration, or RRULE/DTSTART timing for any scheduled ticket type.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -211,7 +504,7 @@ pub fn tool_schemas() -> Vec<Tool> {
                         },
                         "rrule": {
                             "type": "string",
-                            "description": "The new RRULE (iCalendar RFC 5545) for scheduling. Skip if no change. Format: 'DTSTART:YYYYMMDDTHHMMSS' or 'DTSTART:YYYYMMDDTHHMMSS RRULE:FREQ=WEEKLY;BYDAY=MO'"
+                            "description": "The new RFC 5545 schedule for this ticket. Skip if no change. Format: 'DTSTART:YYYYMMDDTHHMMSSZ' for one-time scheduling or 'DTSTART:YYYYMMDDTHHMMSSZ RRULE:FREQ=WEEKLY;BYDAY=MO' for recurrence. Valid for HABIT, EVENT, and TASK tickets."
                         },
                         "duration_minutes": {
                             "type": "integer",

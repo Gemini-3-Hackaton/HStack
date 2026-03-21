@@ -1,10 +1,13 @@
 import { useState, useEffect, type ChangeEvent, type FocusEvent, type KeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { X, Plus, Trash2, Database, Globe, Key, Edit2, Cloud, HardDrive, Server } from "lucide-react";
+import { X, Plus, Trash2, Database, Globe, Key, Edit2, HardDrive, LoaderCircle, LogOut, RefreshCw, Server } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { WebGLGrain } from "./WebGLGrain";
+import { authenticateRemote, clearRemoteSession, formatRemoteUserName, saveRemoteSession, type RemoteAuthMode, resolveAuthBaseUrl } from "../syncAuth";
+import { isOfficialCloudConfigured, normalizeSyncBaseUrl, notifySyncConfigUpdated, type SyncSessionInfo } from "../syncConfig";
+import { getSupportedLocale, SUPPORTED_LOCALE_OPTIONS, type TranslationKey, useI18n } from "../i18n";
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -24,6 +27,24 @@ const THEMES = {
     c4: [20, 20, 20]
   }
 };
+
+const OPENAI_DEFAULT_ENDPOINT = "http://localhost:11434/v1";
+const OPENAI_DEFAULT_MODEL = "llama3";
+
+interface GeminiModelSummary {
+    name: string;
+    label: string;
+}
+
+const HStackMark = ({ size = 18 }: { size?: number }) => (
+        <svg width={size} height={size} viewBox="0 0 210 210" fill="none" aria-hidden="true">
+                <rect x="0" y="0" width="60" height="210" fill="currentColor" />
+                <rect x="150" y="0" width="60" height="210" fill="currentColor" />
+                <rect x="50" y="45" width="100" height="30" fill="currentColor" />
+                <rect x="50" y="90" width="100" height="30" fill="currentColor" />
+                <rect x="50" y="135" width="100" height="30" fill="currentColor" />
+        </svg>
+);
 
 const PhysicalWrapper = ({ children, outerClass = '', innerClass = '', checked = false, shaderColors = THEMES.default }: {
   children: React.ReactNode;
@@ -51,14 +72,21 @@ const PhysicalWrapper = ({ children, outerClass = '', innerClass = '', checked =
   </div>
 );
 
+const InsetSurface = ({ children, className = '' }: { children: React.ReactNode; className?: string }) => (
+    <div className="bg-[#141414] p-[4px] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem]">
+        <div className={cn("relative overflow-hidden shadow-[0_2px_5px_rgba(0,0,0,0.7)] rounded-[15px] bg-[#121212]", className)}>
+            <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.03)_0%,rgba(255,255,255,0.01)_18%,rgba(0,0,0,0)_44%,rgba(0,0,0,0.18)_100%)]" />
+            <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03] z-10" />
+            <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03] z-10" />
+            <div className="relative z-20 w-full h-full">{children}</div>
+        </div>
+    </div>
+);
+
 const EngravedInput = ({ label, className, ...props }: any) => (
     <div className="flex flex-col gap-2">
         <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">{label}</label>
-        <div className="bg-[#141414] p-[4px] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem]">
-            <div className="relative overflow-hidden shadow-[0_2px_5px_rgba(0,0,0,0.7)] rounded-[15px] bg-[#121212]">
-                <WebGLGrain colors={THEMES.default} />
-                <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03] z-10" />
-                <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03] z-10" />
+        <InsetSurface>
                 <input 
                     {...props}
                     className={cn(
@@ -66,8 +94,7 @@ const EngravedInput = ({ label, className, ...props }: any) => (
                         className
                     )}
                 />
-            </div>
-        </div>
+        </InsetSurface>
     </div>
 );
 
@@ -87,29 +114,33 @@ export interface UserSettings {
     hour12: boolean | null;
     sync_mode: 'LocalOnly' | 'CloudOfficial' | 'CloudCustom';
     custom_server_url: string | null;
+    sync_user_id?: number | null;
+    sync_user_name?: string | null;
     onboarding_complete: boolean;
 }
 
-const HOSTING_OPTIONS = [
+const HOSTING_OPTIONS: Array<{
+    mode: 'LocalOnly' | 'CloudOfficial' | 'CloudCustom';
+    titleKey: TranslationKey;
+    descriptionKey: TranslationKey;
+    icon: React.ComponentType<{ size?: number }>;
+}> = [
     {
         mode: 'LocalOnly' as const,
-        title: 'Local Only',
-        description: 'Keep everything on this device with no sync dependency.',
-        hint: 'Best for privacy-first personal use.',
+        titleKey: 'hostingLocalTitle',
+        descriptionKey: 'hostingLocalDescription',
         icon: HardDrive,
     },
     {
         mode: 'CloudOfficial' as const,
-        title: 'Official Cloud',
-        description: 'Use the managed HStack cloud for sync across devices.',
-        hint: 'Fastest setup for multi-device access.',
-        icon: Cloud,
+        titleKey: 'hostingOfficialTitle',
+        descriptionKey: 'hostingOfficialDescription',
+        icon: HStackMark,
     },
     {
         mode: 'CloudCustom' as const,
-        title: 'Self-Hosted',
-        description: 'Connect this app to your own HStack Lite deployment.',
-        hint: 'Bring your own server endpoint.',
+        titleKey: 'hostingCustomTitle',
+        descriptionKey: 'hostingCustomDescription',
         icon: Server,
     }
 ];
@@ -120,14 +151,25 @@ interface SettingsProps {
 }
 
 export const Settings = ({ isOpen, onClose }: SettingsProps) => {
+    const { t } = useI18n();
     const [settings, setSettings] = useState<UserSettings | null>(null);
+    const [syncSession, setSyncSession] = useState<SyncSessionInfo | null>(null);
     const [isAdding, setIsAdding] = useState(false);
+    const [syncAuthMode, setSyncAuthMode] = useState<RemoteAuthMode>('login');
+    const [syncFirstName, setSyncFirstName] = useState('');
+    const [syncLastName, setSyncLastName] = useState('');
+    const [syncPassword, setSyncPassword] = useState('');
+    const [syncPending, setSyncPending] = useState(false);
+    const [syncError, setSyncError] = useState<string | null>(null);
+    const [geminiModels, setGeminiModels] = useState<GeminiModelSummary[]>([]);
+    const [isLoadingGeminiModels, setIsLoadingGeminiModels] = useState(false);
+    const [geminiModelsError, setGeminiModelsError] = useState<string | null>(null);
     const [newProvider, setNewProvider] = useState<Partial<SavedProvider & { apiKey: string }>>({
         name: "",
         kind: "OpenAiCompatible",
-        endpoint: "http://localhost:11434/v1",
+        endpoint: OPENAI_DEFAULT_ENDPOINT,
         apiKey: "",
-        model_name: "llama3"
+        model_name: OPENAI_DEFAULT_MODEL
     });
 
     useEffect(() => {
@@ -138,8 +180,14 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
 
     const loadSettings = async () => {
         try {
-            const res = await invoke<UserSettings>("get_settings");
-            setSettings(res);
+            const [loadedSettings, loadedSession] = await Promise.all([
+                invoke<UserSettings>("get_settings"),
+                invoke<SyncSessionInfo>("get_sync_session"),
+            ]);
+            setSettings(loadedSettings);
+            setSyncSession(loadedSession);
+            setSyncError(null);
+            setSyncPassword('');
         } catch (err) {
             console.error("Failed to load settings:", err);
         }
@@ -167,12 +215,147 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
             id: undefined, // Force new UUID on save
             name: "",
             kind: "OpenAiCompatible",
-            endpoint: "http://localhost:11434/v1",
+            endpoint: OPENAI_DEFAULT_ENDPOINT,
             apiKey: "",
-            model_name: "llama3"
+            model_name: OPENAI_DEFAULT_MODEL
         });
+        setGeminiModels([]);
+        setGeminiModelsError(null);
         setIsAdding(true);
     };
+
+    const fetchGeminiModels = async (apiKey: string) => {
+        const trimmedKey = apiKey.trim();
+        if (!trimmedKey) {
+            setGeminiModels([]);
+            setGeminiModelsError(null);
+            return;
+        }
+
+        try {
+            setIsLoadingGeminiModels(true);
+            setGeminiModelsError(null);
+
+            const collected = new Map<string, GeminiModelSummary>();
+            let nextPageToken: string | null = null;
+
+            do {
+                const url = new URL('https://generativelanguage.googleapis.com/v1beta/models');
+                url.searchParams.set('key', trimmedKey);
+                url.searchParams.set('pageSize', '1000');
+                if (nextPageToken) {
+                    url.searchParams.set('pageToken', nextPageToken);
+                }
+
+                const response = await fetch(url.toString());
+                if (!response.ok) {
+                    throw new Error(`Gemini models request failed: ${response.status}`);
+                }
+
+                const payload = await response.json() as {
+                    models?: Array<{
+                        name?: string;
+                        baseModelId?: string;
+                        displayName?: string;
+                        supportedGenerationMethods?: string[];
+                    }>;
+                    nextPageToken?: string;
+                };
+
+                for (const model of payload.models || []) {
+                    const supportsGeneration = model.supportedGenerationMethods?.includes('generateContent');
+                    const modelName = model.baseModelId || model.name?.replace(/^models\//, '') || '';
+                    if (!supportsGeneration || !modelName.startsWith('gemini')) {
+                        continue;
+                    }
+
+                    if (!collected.has(modelName)) {
+                        collected.set(modelName, {
+                            name: modelName,
+                            label: model.displayName?.trim() || modelName,
+                        });
+                    }
+                }
+
+                nextPageToken = payload.nextPageToken || null;
+            } while (nextPageToken);
+
+            const sortedModels = Array.from(collected.values()).sort((left, right) => left.label.localeCompare(right.label));
+            setGeminiModels(sortedModels);
+
+            setNewProvider((current) => {
+                if (current.kind !== 'Gemini') {
+                    return current;
+                }
+
+                if (current.model_name && sortedModels.some((model) => model.name === current.model_name)) {
+                    return current;
+                }
+
+                return {
+                    ...current,
+                    model_name: sortedModels[0]?.name || current.model_name || '',
+                };
+            });
+        } catch (error) {
+            console.error('Failed to load Gemini models:', error);
+            setGeminiModels([]);
+            setGeminiModelsError(error instanceof Error ? error.message : 'Failed to load Gemini models.');
+        } finally {
+            setIsLoadingGeminiModels(false);
+        }
+    };
+
+    const handleProviderKindChange = (kind: SavedProvider["kind"]) => {
+        setNewProvider((current) => {
+            if (kind === 'Gemini') {
+                return {
+                    ...current,
+                    kind,
+                    endpoint: '',
+                    model_name: current.kind === 'Gemini' ? (current.model_name || '') : '',
+                };
+            }
+
+            return {
+                ...current,
+                kind,
+                endpoint: current.endpoint?.trim() ? current.endpoint : OPENAI_DEFAULT_ENDPOINT,
+                model_name:
+                    current.kind === 'OpenAiCompatible' && current.model_name?.trim()
+                        ? current.model_name
+                        : OPENAI_DEFAULT_MODEL,
+            };
+        });
+
+        if (kind !== 'Gemini') {
+            setGeminiModels([]);
+            setGeminiModelsError(null);
+            setIsLoadingGeminiModels(false);
+        }
+    };
+
+    useEffect(() => {
+        if (!isAdding || newProvider.kind !== 'Gemini') {
+            return;
+        }
+
+        const apiKey = newProvider.apiKey?.trim();
+        if (!apiKey) {
+            setGeminiModels([]);
+            setGeminiModelsError(null);
+            setIsLoadingGeminiModels(false);
+            return;
+        }
+
+        const timer = window.setTimeout(() => {
+            void fetchGeminiModels(apiKey);
+        }, 300);
+
+        return () => {
+            window.clearTimeout(timer);
+        };
+    }, [isAdding, newProvider.kind, newProvider.apiKey]);
 
     const handleUpsertProvider = async () => {
         if (!settings || !newProvider.name || !newProvider.model_name) return;
@@ -181,7 +364,7 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
             id: newProvider.id || crypto.randomUUID(),
             name: newProvider.name,
             kind: (newProvider.kind as any) || "OpenAiCompatible",
-            endpoint: newProvider.endpoint || "",
+            endpoint: newProvider.kind === 'Gemini' ? "" : (newProvider.endpoint || ""),
             model_name: newProvider.model_name,
         };
 
@@ -220,17 +403,125 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
 
     const handleSyncModeChange = async (syncMode: UserSettings["sync_mode"]) => {
         if (!settings || settings.sync_mode === syncMode) return;
-        const updated = {
-            ...settings,
-            sync_mode: syncMode,
-        };
 
         try {
+            await clearRemoteSession();
+            const updated = {
+                ...settings,
+                sync_mode: syncMode,
+                sync_user_id: null,
+                sync_user_name: null,
+            };
             await persistSettings(updated);
+            setSyncSession({ user_id: null, user_name: null, token: null });
+            setSyncAuthMode('login');
+            setSyncFirstName('');
+            setSyncLastName('');
+            setSyncPassword('');
+            setSyncError(null);
+            notifySyncConfigUpdated();
         } catch (err) {
             console.error("Failed to update hosting mode:", err);
         }
     };
+
+    const handleRemoteAuth = async () => {
+        if (!settings || syncPending) return;
+
+        try {
+            setSyncPending(true);
+            setSyncError(null);
+
+            const baseUrl = resolveAuthBaseUrl(settings.sync_mode, settings.custom_server_url);
+
+            if (!baseUrl) {
+                throw new Error(
+                    settings.sync_mode === 'CloudOfficial'
+                        ? t('officialCloudUnavailable')
+                        : t('enterValidServerUrl')
+                );
+            }
+
+            const authResult = await authenticateRemote({
+                baseUrl,
+                mode: syncAuthMode,
+                firstName: syncFirstName,
+                lastName: syncLastName,
+                password: syncPassword,
+            });
+
+            await saveRemoteSession(authResult);
+
+            const normalizedCustomUrl = settings.sync_mode === 'CloudCustom'
+                ? normalizeSyncBaseUrl(settings.custom_server_url)
+                : settings.custom_server_url;
+            const userName = formatRemoteUserName(authResult.user);
+            const updatedSettings = {
+                ...settings,
+                custom_server_url: normalizedCustomUrl,
+                sync_user_id: authResult.user.id,
+                sync_user_name: userName,
+            };
+
+            if (settings.sync_mode === 'CloudCustom' && normalizedCustomUrl !== settings.custom_server_url) {
+                await persistSettings(updatedSettings);
+            } else {
+                setSettings(updatedSettings);
+            }
+
+            setSyncSession({
+                user_id: authResult.user.id,
+                user_name: userName,
+                token: authResult.token,
+            });
+            setSyncLastName('');
+            setSyncPassword('');
+            notifySyncConfigUpdated();
+        } catch (err) {
+            console.error('Failed to authenticate sync account:', err);
+            setSyncError(err instanceof Error ? err.message : t('remoteAuthFailed'));
+        } finally {
+            setSyncPending(false);
+        }
+    };
+
+    const handleSignOut = async () => {
+        if (!settings || syncPending) return;
+
+        try {
+            setSyncPending(true);
+            await clearRemoteSession();
+            setSettings({
+                ...settings,
+                sync_user_id: null,
+                sync_user_name: null,
+            });
+            setSyncSession({ user_id: null, user_name: null, token: null });
+            setSyncLastName('');
+            setSyncPassword('');
+            setSyncError(null);
+            notifySyncConfigUpdated();
+        } catch (err) {
+            console.error('Failed to clear sync session:', err);
+        } finally {
+            setSyncPending(false);
+        }
+    };
+
+    const remoteBaseUrl = settings ? resolveAuthBaseUrl(settings.sync_mode, settings.custom_server_url) : null;
+    const hasRemoteMode = settings?.sync_mode === 'CloudOfficial' || settings?.sync_mode === 'CloudCustom';
+    const hasRemoteSession = Boolean(syncSession?.token && syncSession.user_id);
+
+    const isGeminiProvider = newProvider.kind === 'Gemini';
+    const selectedLocale = getSupportedLocale(settings?.locale || 'en-GB');
+    const geminiModelOptions = (() => {
+        const options = [...geminiModels];
+        const currentModel = newProvider.model_name?.trim();
+        if (currentModel && !options.some((model) => model.name === currentModel)) {
+            options.unshift({ name: currentModel, label: currentModel });
+        }
+        return options;
+    })();
 
     return (
         <AnimatePresence>
@@ -251,8 +542,8 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                         <div className="flex items-center justify-between mb-8 shrink-0" data-tauri-drag-region>
                             <div className="flex items-center gap-3 pointer-events-none" data-tauri-drag-region>
                                 <div data-tauri-drag-region>
-                                    <h2 className="text-[20px] font-semibold tracking-tight text-[#D1D1D1]" data-tauri-drag-region>Settings</h2>
-                                    <p className="text-[9px] text-[#777] uppercase tracking-widest font-bold" data-tauri-drag-region>Configuration & LLM</p>
+                                    <h2 className="text-[20px] font-semibold tracking-tight text-[#D1D1D1]" data-tauri-drag-region>{t('settingsTitle')}</h2>
+                                    <p className="text-[9px] text-[#777] uppercase tracking-widest font-bold" data-tauri-drag-region>{t('settingsSubtitle')}</p>
                                 </div>
                             </div>
                             <button 
@@ -269,7 +560,7 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                             <section className="mb-8">
                                 <div className="flex items-center justify-between mb-4 px-1">
                                     <h3 className="text-[12px] uppercase tracking-widest font-bold text-[#777] flex items-center gap-2">
-                                        Hosting & Sync
+                                        {t('settingsHostingSync')}
                                     </h3>
                                 </div>
 
@@ -286,27 +577,33 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                 className="text-left"
                                             >
                                                 <PhysicalWrapper
-                                                    innerClass="p-4 flex items-start gap-4 transition-colors"
+                                                    outerClass="rounded-[1.15rem]"
+                                                    innerClass="px-3.5 py-3 flex items-start gap-3 transition-colors"
                                                     shaderColors={isSelected ? THEMES.emerald : THEMES.default}
                                                 >
-                                                    <div className={cn(
-                                                        "relative z-20 w-11 h-11 rounded-2xl border flex items-center justify-center shrink-0 transition-colors",
-                                                        isSelected ? "border-white/10 bg-white/10 text-[#D1D1D1]" : "border-white/5 bg-black/20 text-[#777]"
-                                                    )}>
-                                                        <Icon size={18} />
-                                                    </div>
-                                                    <div className="relative z-20 flex-1 min-w-0">
-                                                        <div className="flex items-center justify-between gap-3">
-                                                            <span className="text-[15px] font-medium text-[#D1D1D1]">{option.title}</span>
+                                                    <div className="relative z-20 min-w-0 flex-1">
+                                                        <div className="flex items-start justify-between gap-3">
+                                                            <div>
+                                                                <div className="flex items-center gap-2.5">
+                                                                    <div className={cn(
+                                                                        "flex h-5 w-5 shrink-0 items-center justify-center transition-colors",
+                                                                        isSelected ? "text-[#D9DDE4]" : "text-[#C8CDD6]"
+                                                                    )}>
+                                                                        <Icon size={16} />
+                                                                    </div>
+                                                                    <span className="text-[16px] font-medium tracking-[-0.02em] text-[#F1F1F1]">{t(option.titleKey)}</span>
+                                                                </div>
+                                                                <p className="mt-1 pr-1 text-[13px] leading-6 text-white/58">{t(option.descriptionKey)}</p>
+                                                            </div>
                                                             <span className={cn(
-                                                                "text-[9px] font-bold uppercase tracking-[0.22em]",
-                                                                isSelected ? "text-[#D1D1D1]" : "text-[#555]"
+                                                                "inline-flex shrink-0 items-center pt-0.5 text-[9px] font-bold uppercase tracking-[0.22em]",
+                                                                isSelected
+                                                                    ? "text-white/45"
+                                                                    : "text-white/32"
                                                             )}>
-                                                                {isSelected ? 'Selected' : 'Available'}
+                                                                {isSelected ? t('current') : t('select')}
                                                             </span>
                                                         </div>
-                                                        <p className="mt-1 text-[12px] text-[#8A8A8A] leading-relaxed">{option.description}</p>
-                                                        <p className="mt-2 text-[10px] uppercase tracking-[0.18em] text-[#555]">{option.hint}</p>
                                                     </div>
                                                 </PhysicalWrapper>
                                             </button>
@@ -316,19 +613,31 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                     {settings?.sync_mode === 'CloudCustom' && (
                                         <div className="pt-2">
                                             <EngravedInput
-                                                label="Custom Server URL"
+                                                label={t('customServerUrl')}
                                                 value={settings.custom_server_url || ""}
                                                 onChange={(e: ChangeEvent<HTMLInputElement>) => setSettings({ ...settings, custom_server_url: e.target.value })}
                                                 onBlur={async (e: FocusEvent<HTMLInputElement>) => {
                                                     if (!settings) return;
-                                                    const trimmed = e.target.value.trim();
+                                                    const normalized = normalizeSyncBaseUrl(e.target.value);
+                                                    const didChange = normalized !== normalizeSyncBaseUrl(settings.custom_server_url);
                                                     const updated = {
                                                         ...settings,
-                                                        custom_server_url: trimmed || null,
+                                                        custom_server_url: normalized,
+                                                        sync_user_id: didChange ? null : settings.sync_user_id,
+                                                        sync_user_name: didChange ? null : settings.sync_user_name,
                                                     };
 
                                                     try {
+                                                        if (didChange) {
+                                                            await clearRemoteSession();
+                                                            setSyncSession({ user_id: null, user_name: null, token: null });
+                                                            setSyncPassword('');
+                                                            setSyncError(null);
+                                                        }
                                                         await persistSettings(updated);
+                                                        if (didChange) {
+                                                            notifySyncConfigUpdated();
+                                                        }
                                                     } catch (err) {
                                                         console.error("Failed to save custom server URL:", err);
                                                     }
@@ -338,11 +647,145 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                         e.currentTarget.blur();
                                                     }
                                                 }}
-                                                placeholder="https://your-hstack-lite.example.com"
+                                                placeholder={t('customServerPlaceholder')}
                                                 className="font-mono"
                                             />
-                                            <p className="mt-2 px-1 text-[10px] text-[#555]">Saved when the field loses focus. Point this to your HStack Lite base URL.</p>
+                                            <p className="mt-2 px-1 text-[10px] text-[#555]">{t('customServerHint')}</p>
                                         </div>
+                                    )}
+
+                                    {hasRemoteMode && settings && (
+                                        <PhysicalWrapper
+                                            outerClass="rounded-[1.15rem]"
+                                            innerClass="p-4 flex flex-col gap-4"
+                                            shaderColors={THEMES.default}
+                                        >
+                                            <div className="relative z-20 flex items-start justify-between gap-4">
+                                                <div className="min-w-0">
+                                                    <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/32">{t('account')}</p>
+                                                    <p className="mt-2 text-[14px] leading-6 text-[#E6E6E6]">
+                                                        {hasRemoteSession
+                                                            ? t('connectedAs', { name: syncSession?.user_name || settings.sync_user_name || t('yourAccount') })
+                                                            : settings.sync_mode === 'CloudOfficial'
+                                                                ? t('signInManagedCloud')
+                                                                : t('signInSelfHosted')}
+                                                    </p>
+                                                </div>
+                                                {remoteBaseUrl ? (
+                                                    <span className="shrink-0 rounded-full border border-white/10 bg-black/15 px-3 py-1 text-[10px] font-medium text-white/34">
+                                                        {remoteBaseUrl}
+                                                    </span>
+                                                ) : null}
+                                            </div>
+
+                                            {settings.sync_mode === 'CloudOfficial' && !isOfficialCloudConfigured() ? (
+                                                <div className="relative z-20 rounded-[1rem] border border-amber-300/18 bg-amber-200/6 px-3.5 py-3 text-[12px] leading-5 text-amber-100/72">
+                                                    {t('officialCloudUnavailable')}
+                                                </div>
+                                            ) : null}
+
+                                            {settings.sync_mode === 'CloudCustom' && !remoteBaseUrl ? (
+                                                <div className="relative z-20 rounded-[1rem] border border-white/8 bg-black/18 px-3.5 py-3 text-[12px] leading-5 text-white/48">
+                                                    {t('enterServerBeforeSignIn')}
+                                                </div>
+                                            ) : null}
+
+                                            {hasRemoteSession ? (
+                                                <div className="relative z-20 flex items-center justify-between gap-4 rounded-[1rem] border border-white/8 bg-black/14 px-3.5 py-3.5">
+                                                    <div className="min-w-0">
+                                                        <p className="text-[15px] font-medium text-[#F1F1F1]">{syncSession?.user_name || settings.sync_user_name || t('connectedAccount')}</p>
+                                                        <p className="mt-1 text-[12px] text-white/42">
+                                                            {settings.sync_mode === 'CloudOfficial' ? t('managedCloudSession') : t('selfHostedSession')}
+                                                        </p>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleSignOut}
+                                                        disabled={syncPending}
+                                                        className="inline-flex shrink-0 items-center gap-2 rounded-[999px] border border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-white/58 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
+                                                    >
+                                                        {syncPending ? <LoaderCircle size={13} className="animate-spin" /> : <LogOut size={13} />}
+                                                        {t('signOut')}
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <div className="relative z-20 flex flex-col gap-4">
+                                                    <div className="flex rounded-[999px] border border-white/8 bg-black/15 p-1">
+                                                        {(['login', 'register'] as const).map(mode => {
+                                                            const isActive = syncAuthMode === mode;
+                                                            return (
+                                                                <button
+                                                                    key={mode}
+                                                                    type="button"
+                                                                    onClick={() => setSyncAuthMode(mode)}
+                                                                    className={cn(
+                                                                        "flex-1 rounded-[999px] px-3 py-2 text-[10px] font-bold uppercase tracking-[0.18em] transition-colors",
+                                                                        isActive ? "bg-white text-[#080808]" : "text-white/40 hover:text-white/64"
+                                                                    )}
+                                                                >
+                                                                    {mode === 'login' ? t('login') : t('register')}
+                                                                </button>
+                                                            );
+                                                        })}
+                                                    </div>
+
+                                                    <div className="grid gap-3 sm:grid-cols-2">
+                                                        <EngravedInput
+                                                            label={t('firstName')}
+                                                            value={syncFirstName}
+                                                            onChange={(e: ChangeEvent<HTMLInputElement>) => setSyncFirstName(e.target.value)}
+                                                            placeholder={syncAuthMode === 'login' ? t('accountFirstName') : t('chooseFirstName')}
+                                                        />
+                                                        {syncAuthMode === 'register' ? (
+                                                            <EngravedInput
+                                                                label={t('lastName')}
+                                                                value={syncLastName}
+                                                                onChange={(e: ChangeEvent<HTMLInputElement>) => setSyncLastName(e.target.value)}
+                                                                placeholder={t('optional')}
+                                                            />
+                                                        ) : (
+                                                            <EngravedInput
+                                                                label={t('password')}
+                                                                type="password"
+                                                                value={syncPassword}
+                                                                onChange={(e: ChangeEvent<HTMLInputElement>) => setSyncPassword(e.target.value)}
+                                                                placeholder={t('enterPassword')}
+                                                            />
+                                                        )}
+                                                    </div>
+
+                                                    {syncAuthMode === 'register' ? (
+                                                        <EngravedInput
+                                                            label={t('password')}
+                                                            type="password"
+                                                            value={syncPassword}
+                                                            onChange={(e: ChangeEvent<HTMLInputElement>) => setSyncPassword(e.target.value)}
+                                                            placeholder={t('createPassword')}
+                                                        />
+                                                    ) : null}
+
+                                                    {syncError ? (
+                                                        <div className="rounded-[1rem] border border-red-400/18 bg-red-500/8 px-3.5 py-3 text-[12px] leading-5 text-red-100/80">
+                                                            {syncError}
+                                                        </div>
+                                                    ) : null}
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleRemoteAuth}
+                                                        disabled={!syncFirstName.trim() || !syncPassword || !remoteBaseUrl || syncPending}
+                                                        className="inline-flex items-center justify-center gap-2 rounded-[1rem] bg-[#EFEFEF] px-4 py-3 text-[11px] font-bold uppercase tracking-[0.2em] text-[#080808] transition-all hover:bg-white disabled:cursor-not-allowed disabled:opacity-45"
+                                                    >
+                                                        {syncPending ? <LoaderCircle size={14} className="animate-spin" /> : null}
+                                                        {syncAuthMode === 'login' ? t('signIn') : t('createAccount')}
+                                                    </button>
+
+                                                    <p className="text-[10px] leading-5 text-white/26">
+                                                        {t('syncKeychainHint')}
+                                                    </p>
+                                                </div>
+                                            )}
+                                        </PhysicalWrapper>
                                     )}
                                 </div>
                             </section>
@@ -351,14 +794,14 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                             <section className="mb-8">
                                 <div className="flex items-center justify-between mb-4 px-1">
                                     <h3 className="text-[12px] uppercase tracking-widest font-bold text-[#777] flex items-center gap-2">
-                                        LLM Providers
+                                        {t('llmProviders')}
                                     </h3>
                                     <button 
                                         onClick={handleAddNew}
                                         className="text-[9px] font-bold uppercase tracking-widest text-[#D1D1D1] hover:text-white transition-colors flex items-center gap-1.5 shrink-0"
                                     >
                                         <Plus size={12} />
-                                        Add New
+                                        {t('addNew')}
                                     </button>
                                 </div>
 
@@ -386,14 +829,14 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                         <button 
                                                             onClick={(e) => { e.stopPropagation(); handleEditProvider(p); }}
                                                             className="p-2 rounded-lg hover:bg-white/5 text-[#777] hover:text-[#D1D1D1] transition-all opacity-0 group-hover:opacity-100"
-                                                            title="Edit Provider"
+                                                            title={t('editProvider')}
                                                         >
                                                             <Edit2 size={16} />
                                                         </button>
                                                         <button 
                                                             onClick={(e) => { e.stopPropagation(); handleDeleteProvider(p.id); }}
                                                             className="p-2 rounded-lg hover:bg-red-500/10 text-[#777] hover:text-red-400 transition-all opacity-0 group-hover:opacity-100"
-                                                            title="Delete Provider"
+                                                            title={t('deleteProvider')}
                                                         >
                                                             <Trash2 size={16} />
                                                         </button>
@@ -402,11 +845,11 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                 <div className="flex items-center gap-4 text-[11px] text-[#777] relative z-20 pointer-events-none">
                                                     <div className="flex items-center gap-1.5 shrink-0">
                                                         <Database size={12} />
-                                                        {p.kind === 'OpenAiCompatible' ? 'OpenAI compatible' : 'Google Gemini'}
+                                                        {p.kind === 'OpenAiCompatible' ? t('openAiCompatible') : t('googleGemini')}
                                                     </div>
                                                     <div className="flex items-center gap-1.5 min-w-0">
                                                         <Globe size={12} className="shrink-0" />
-                                                        <span className="truncate">{p.endpoint || 'Cloud API'}</span>
+                                                        <span className="truncate">{p.endpoint || t('cloudApi')}</span>
                                                     </div>
                                                 </div>
                                             </PhysicalWrapper>
@@ -415,7 +858,7 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
 
                                     {settings?.providers.length === 0 && !isAdding && (
                                         <div className="p-8 rounded-[1.25rem] border border-dashed border-[#333] text-center">
-                                            <p className="text-[13px] text-[#777]">No providers configured yet.</p>
+                                            <p className="text-[13px] text-[#777]">{t('noProvidersConfigured')}</p>
                                         </div>
                                     )}
                                 </div>
@@ -425,42 +868,43 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                             <section className="mt-6 border-t border-white/5 pt-6">
                                 <div className="flex items-center justify-between mb-4 px-1">
                                     <h3 className="text-[12px] uppercase tracking-widest font-bold text-[#777] flex items-center gap-2">
-                                        Locale & Display
+                                        {t('localeDisplay')}
                                     </h3>
                                 </div>
 
                                 <div className="flex flex-col gap-5">
                                     <div className="flex flex-col gap-2">
-                                        <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">Language & Region</label>
+                                        <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">{t('languageRegion')}</label>
                                         <select 
-                                            value={settings?.locale || navigator.language || 'en-US'}
+                                            value={selectedLocale}
                                             onChange={async (e) => {
                                                 if (!settings) return;
                                                 const updated = { ...settings, locale: e.target.value };
                                                 await invoke("save_settings", { settings: updated });
                                                 setSettings(updated);
-                                                // Show a subtle notification instead of full reload
                                                 setTimeout(() => {
-                                                    const event = new CustomEvent('localeUpdated');
-                                                    window.dispatchEvent(event);
-                                            }, 100);
+                                                    window.dispatchEvent(new CustomEvent('localeUpdated'));
+                                                }, 100);
                                             }}
                                             className="bg-[#141414] p-4 shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem] text-[14px] text-[#D1D1D1] outline-none border border-transparent hover:border-white/5 transition-all"
                                         >
-                                            <option value="en-US">English (US)</option>
-                                            <option value="en-GB">English (UK)</option>
-                                            <option value="fr-FR">Français (France)</option>
-                                            <option value="de-DE">Deutsch (Deutschland)</option>
-                                            <option value="es-ES">Español (España)</option>
-                                            <option value="it-IT">Italiano (Italia)</option>
-                                            <option value="ja-JP">日本語 (日本)</option>
-                                            <option value="zh-CN">中文 (中国)</option>
+                                            {SUPPORTED_LOCALE_OPTIONS.map((option) => (
+                                                <option key={option.value} value={option.value}>
+                                                    {option.value === 'en-GB'
+                                                        ? t('languageEnglishUk')
+                                                        : option.value === 'fr-FR'
+                                                            ? t('languageFrench')
+                                                            : option.value === 'es-ES'
+                                                                ? t('languageSpanish')
+                                                                : t('languageChinese')}
+                                                </option>
+                                            ))}
                                         </select>
-                                        <p className="text-[10px] text-[#555] px-1">Changes will apply on next app launch</p>
+                                        <p className="text-[10px] text-[#555] px-1">{t('localeAppliesImmediately')}</p>
                                     </div>
 
                                     <div className="flex flex-col gap-2">
-                                        <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">Time Format</label>
+                                        <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">{t('timeFormat')}</label>
                                         <div className="bg-[#141414] p-[4px] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem] flex gap-2 border border-transparent">
                                             <button
                                                 onClick={async () => {
@@ -468,6 +912,9 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                     const updated = { ...settings, hour12: true };
                                                     await invoke("save_settings", { settings: updated });
                                                     setSettings(updated);
+                                                    setTimeout(() => {
+                                                        window.dispatchEvent(new CustomEvent('localeUpdated'));
+                                                    }, 100);
                                                 }}
                                                 className={cn(
                                                     "relative flex-1 py-3 rounded-[13px] text-[12px] font-medium transition-all overflow-hidden",
@@ -475,13 +922,9 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                 )}
                                             >
                                                 {settings?.hour12 !== false && (
-                                                    <>
-                                                        <WebGLGrain colors={THEMES.default} />
-                                                        <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03]" />
-                                                        <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03]" />
-                                                    </>
+                                                    <div className="absolute inset-0 rounded-[13px] bg-[linear-gradient(180deg,#1c1c1c_0%,#141414_100%)]" />
                                                 )}
-                                                <span className="relative z-10">12-hour (AM/PM)</span>
+                                                <span className="relative z-10">{t('timeFormat12h')}</span>
                                             </button>
                                             <button
                                                 onClick={async () => {
@@ -489,6 +932,9 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                     const updated = { ...settings, hour12: false };
                                                     await invoke("save_settings", { settings: updated });
                                                     setSettings(updated);
+                                                    setTimeout(() => {
+                                                        window.dispatchEvent(new CustomEvent('localeUpdated'));
+                                                    }, 100);
                                                 }}
                                                 className={cn(
                                                     "relative flex-1 py-3 rounded-[13px] text-[12px] font-medium transition-all overflow-hidden",
@@ -496,16 +942,12 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                                 )}
                                             >
                                                 {settings?.hour12 === false && (
-                                                    <>
-                                                        <WebGLGrain colors={THEMES.default} />
-                                                        <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03]" />
-                                                        <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03]" />
-                                                    </>
+                                                    <div className="absolute inset-0 rounded-[13px] bg-[linear-gradient(180deg,#1c1c1c_0%,#141414_100%)]" />
                                                 )}
-                                                <span className="relative z-10">24-hour</span>
+                                                <span className="relative z-10">{t('timeFormat24h')}</span>
                                             </button>
                                         </div>
-                                        <p className="text-[10px] text-[#555] px-1">Changes will apply on next app launch</p>
+                                        <p className="text-[10px] text-[#555] px-1">{t('localeAppliesImmediately')}</p>
                                     </div>
                                 </div>
                             </section>
@@ -515,7 +957,7 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                         <div className="mt-6 pt-6 border-t border-white/5 shrink-0">
                             <div className="flex items-center gap-3 p-4 rounded-[1.25rem] bg-[#141414] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] border border-transparent text-[11px] text-[#777] leading-relaxed relative overflow-hidden">
                                 <Key size={16} className="shrink-0 text-[#D1D1D1] relative z-10" />
-                                <p className="relative z-10">API keys are securely stored in your OS Keychain (Hardware Encrypted) and never written to disk in plaintext.</p>
+                                <p className="relative z-10">{t('apiKeysSecurity')}</p>
                                 <div className="absolute inset-0 bg-[#121212] opacity-50 z-0"></div>
                             </div>
                         </div>
@@ -531,7 +973,7 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                 >
                                     <div className="flex items-center justify-between mb-8">
                                         <h3 className="text-[18px] font-semibold text-[#D1D1D1]">
-                                            {newProvider.id ? 'Edit Provider' : 'New Provider'}
+                                            {newProvider.id ? t('editProvider') : t('newProvider')}
                                         </h3>
                                         <button onClick={() => setIsAdding(false)} className="text-[#777] hover:text-[#D1D1D1] transition-colors">
                                             <X size={24} />
@@ -540,151 +982,107 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
 
                                     <div className="flex-1 overflow-y-auto no-scrollbar flex flex-col gap-5 pb-8">
                                         <EngravedInput 
-                                            label="Friendly Name"
+                                            label={t('friendlyName')}
                                             value={newProvider.name}
                                             onChange={(e: any) => setNewProvider({...newProvider, name: e.target.value})}
-                                            placeholder="e.g. Local Ollama"
+                                            placeholder={t('friendlyNamePlaceholder')}
                                         />
 
                                         <div className="flex flex-col gap-2">
-                                            <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">Provider Kind</label>
+                                            <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">{t('providerKind')}</label>
                                             <div className="bg-[#141414] p-[4px] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem] flex gap-2">
                                                 {['OpenAiCompatible', 'Gemini'].map(kind => {
                                                     const isSelected = newProvider.kind === kind;
                                                     return (
                                                         <button
                                                             key={kind}
-                                                            onClick={() => setNewProvider({...newProvider, kind: kind as any})}
+                                                            onClick={() => handleProviderKindChange(kind as SavedProvider['kind'])}
                                                             className={cn(
                                                                 "relative flex-1 py-3 rounded-[13px] text-[12px] font-medium transition-all overflow-hidden",
                                                                 isSelected ? "text-[#D1D1D1] shadow-[0_2px_5px_rgba(0,0,0,0.7)]" : "text-[#777] hover:text-[#D1D1D1] bg-transparent"
                                                             )}
                                                         >
                                                             {isSelected && (
-                                                                <>
-                                                                    <WebGLGrain colors={THEMES.default} />
-                                                                    <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03]" />
-                                                                    <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03]" />
-                                                                </>
+                                                                <div className="absolute inset-0 rounded-[13px] bg-[linear-gradient(180deg,#1c1c1c_0%,#141414_100%)]" />
                                                             )}
-                                                            <span className="relative z-10">{kind === 'OpenAiCompatible' ? 'OpenAI compatible' : 'Gemini'}</span>
+                                                            <span className="relative z-10">{kind === 'OpenAiCompatible' ? t('openAiCompatible') : t('googleGemini')}</span>
                                                         </button>
                                                     );
                                                 })}
                                             </div>
                                         </div>
 
-                                        <EngravedInput 
-                                            label="Endpoint URL"
-                                            value={newProvider.endpoint}
-                                            onChange={(e: any) => setNewProvider({...newProvider, endpoint: e.target.value})}
-                                            placeholder="http://localhost:11434/v1"
-                                            className="font-mono"
-                                        />
+                                        {isGeminiProvider ? (
+                                            <div className="flex flex-col gap-2">
+                                                <div className="flex items-center justify-between gap-3 px-1">
+                                                    <label className="text-[9px] font-bold uppercase tracking-widest text-[#777]">{t('geminiModel')}</label>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => void fetchGeminiModels(newProvider.apiKey || '')}
+                                                        disabled={!newProvider.apiKey?.trim() || isLoadingGeminiModels}
+                                                        className="inline-flex items-center gap-1 text-[9px] font-bold uppercase tracking-widest text-[#777] transition-colors hover:text-[#D1D1D1] disabled:cursor-not-allowed disabled:opacity-40"
+                                                    >
+                                                        <RefreshCw size={10} className={cn(isLoadingGeminiModels && 'animate-spin')} />
+                                                        {t('refresh')}
+                                                    </button>
+                                                </div>
+                                                <InsetSurface>
+                                                    <select
+                                                        value={newProvider.model_name || ''}
+                                                        onChange={(e) => setNewProvider({ ...newProvider, model_name: e.target.value })}
+                                                        disabled={geminiModelOptions.length === 0}
+                                                        className="relative z-20 w-full bg-transparent px-4 py-3 text-[14px] text-[#D1D1D1] outline-none disabled:text-[#666]"
+                                                    >
+                                                        {geminiModelOptions.length === 0 ? (
+                                                            <option value="">
+                                                                {newProvider.apiKey?.trim() ? t('noGeminiModelsLoaded') : t('enterGeminiApiKeyFirst')}
+                                                            </option>
+                                                        ) : null}
+                                                        {geminiModelOptions.map((model) => (
+                                                            <option key={model.name} value={model.name}>
+                                                                {model.label}
+                                                            </option>
+                                                        ))}
+                                                    </select>
+                                                </InsetSurface>
+                                                <p className="text-[10px] text-[#555] px-1">{t('geminiEndpointHint')}</p>
+                                                {geminiModelsError ? (
+                                                    <p className="text-[10px] text-red-300/70 px-1">{geminiModelsError}</p>
+                                                ) : null}
+                                            </div>
+                                        ) : (
+                                            <>
+                                                <EngravedInput 
+                                                    label={t('endpointUrl')}
+                                                    value={newProvider.endpoint}
+                                                    onChange={(e: any) => setNewProvider({...newProvider, endpoint: e.target.value})}
+                                                    placeholder={OPENAI_DEFAULT_ENDPOINT}
+                                                    className="font-mono"
+                                                />
+
+                                                <EngravedInput 
+                                                    label={t('modelName')}
+                                                    value={newProvider.model_name}
+                                                    onChange={(e: any) => setNewProvider({...newProvider, model_name: e.target.value})}
+                                                    placeholder={t('modelNamePlaceholder')}
+                                                    className="font-mono"
+                                                />
+                                            </>
+                                        )}
 
                                         <EngravedInput 
-                                            label="Model Name"
-                                            value={newProvider.model_name}
-                                            onChange={(e: any) => setNewProvider({...newProvider, model_name: e.target.value})}
-                                            placeholder="llama3, gemini-1.5-flash..."
-                                            className="font-mono"
-                                        />
-
-                                        <EngravedInput 
-                                            label="API Key"
+                                            label={isGeminiProvider ? t('geminiApiKey') : t('apiKey')}
                                             type="password"
                                             value={newProvider.apiKey}
                                             onChange={(e: any) => setNewProvider({...newProvider, apiKey: e.target.value})}
-                                            placeholder={newProvider.id ? "•••••••• (Leave blank to keep existing)" : "••••••••"}
+                                            placeholder={newProvider.id ? t('apiKeyPlaceholderKeepExisting') : '••••••••'}
                                         />
-
-                                        {/* Locale Settings */}
-                                        <div className="flex flex-col gap-2">
-                                            <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">Locale</label>
-                                            <select 
-                                                value={settings?.locale || navigator.language || 'en-US'}
-                                                onChange={async (e) => {
-                                                    if (!settings) return;
-                                                    const updated = { ...settings, locale: e.target.value };
-                                                    await invoke("save_settings", { settings: updated });
-                                                    setSettings(updated);
-                                                    // Reload locale in App.tsx
-                                                    await new Promise(resolve => setTimeout(resolve, 100));
-                                                    window.location.reload();
-                                                }}
-                                                className="bg-[#141414] p-4 shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem] text-[14px] text-[#D1D1D1] outline-none"
-                                            >
-                                                <option value="en-US">English (US)</option>
-                                                <option value="en-GB">English (UK)</option>
-                                                <option value="fr-FR">Français (France)</option>
-                                                <option value="de-DE">Deutsch (Deutschland)</option>
-                                                <option value="es-ES">Español (España)</option>
-                                                <option value="it-IT">Italiano (Italia)</option>
-                                                <option value="ja-JP">日本語 (日本)</option>
-                                                <option value="zh-CN">中文 (中国)</option>
-                                                <option value="auto">Auto-detect</option>
-                                            </select>
-                                        </div>
-
-                                        <div className="flex flex-col gap-2">
-                                            <label className="text-[9px] font-bold uppercase tracking-widest text-[#777] px-1">Time Format</label>
-                                            <div className="bg-[#141414] p-[4px] shadow-[inset_0_2px_5px_rgba(0,0,0,0.8)] rounded-[1.25rem] flex gap-2">
-                                                <button
-                                                    onClick={async () => {
-                                                        if (!settings) return;
-                                                        const updated = { ...settings, hour12: true };
-                                                        await invoke("save_settings", { settings: updated });
-                                                        setSettings(updated);
-                                                        // Reload locale in App.tsx
-                                                        await new Promise(resolve => setTimeout(resolve, 100));
-                                                        window.location.reload();
-                                                    }}
-                                                    className={cn(
-                                                        "relative flex-1 py-3 rounded-[13px] text-[12px] font-medium transition-all overflow-hidden",
-                                                        settings?.hour12 !== false ? "text-[#D1D1D1] shadow-[0_2px_5px_rgba(0,0,0,0.7)]" : "text-[#777] hover:text-[#D1D1D1] bg-transparent"
-                                                    )}
-                                                >
-                                                    {settings?.hour12 !== false && (
-                                                        <>
-                                                            <WebGLGrain colors={THEMES.default} />
-                                                            <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03]" />
-                                                            <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03]" />
-                                                        </>
-                                                    )}
-                                                    <span className="relative z-10">12-hour (AM/PM)</span>
-                                                </button>
-                                                <button
-                                                    onClick={async () => {
-                                                        if (!settings) return;
-                                                        const updated = { ...settings, hour12: false };
-                                                        await invoke("save_settings", { settings: updated });
-                                                        setSettings(updated);
-                                                        // Reload locale in App.tsx
-                                                        await new Promise(resolve => setTimeout(resolve, 100));
-                                                        window.location.reload();
-                                                    }}
-                                                    className={cn(
-                                                        "relative flex-1 py-3 rounded-[13px] text-[12px] font-medium transition-all overflow-hidden",
-                                                        settings?.hour12 === false ? "text-[#D1D1D1] shadow-[0_2px_5px_rgba(0,0,0,0.7)]" : "text-[#777] hover:text-[#D1D1D1] bg-transparent"
-                                                    )}
-                                                >
-                                                    {settings?.hour12 === false && (
-                                                        <>
-                                                            <WebGLGrain colors={THEMES.default} />
-                                                            <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03]" />
-                                                            <div className="absolute top-0 left-0 bottom-0 w-[1px] bg-white/[0.03]" />
-                                                        </>
-                                                    )}
-                                                    <span className="relative z-10">24-hour</span>
-                                                </button>
-                                            </div>
-                                        </div>
 
                                         <button 
                                             onClick={handleUpsertProvider}
                                             className="mt-6 bg-[#D1D1D1] text-[#080808] font-bold tracking-widest uppercase text-[11px] py-4 rounded-[1.25rem] hover:scale-[1.02] active:scale-[0.98] transition-all shadow-[0_4px_10px_rgba(0,0,0,0.5)]"
                                         >
-                                            Save Provider
+                                            {t('saveProvider')}
                                         </button>
                                     </div>
                                 </motion.div>

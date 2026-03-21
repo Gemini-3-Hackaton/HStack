@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { SyncProvider, useSync, TaskModel } from "./SyncEngine";
+import { SyncProvider, TaskModel } from "./SyncEngine";
+import { useSync } from "./useSync";
 import { Send, ChevronDown, Plus, Trash2, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
@@ -9,6 +10,25 @@ import { WebGLGrain } from "./components/WebGLGrain";
 import { motion, AnimatePresence } from "framer-motion";
 import { Settings } from "./components/Settings";
 import { SetupWizard } from "./components/SetupWizard";
+import { getLocaleConfig, translate, useI18n } from "./i18n";
+
+const TASK_TYPE_LABELS = {
+  TASK: 'taskTypeTask',
+  HABIT: 'taskTypeHabit',
+  EVENT: 'taskTypeEvent',
+  COMMUTE: 'taskTypeCommute',
+  COUNTDOWN: 'taskTypeCountdown',
+} as const;
+
+const LEGACY_WEEKDAY_LABELS: Array<{ token: string; dayIndex: number }> = [
+  { token: 'monday', dayIndex: 1 },
+  { token: 'tuesday', dayIndex: 2 },
+  { token: 'wednesday', dayIndex: 3 },
+  { token: 'thursday', dayIndex: 4 },
+  { token: 'friday', dayIndex: 5 },
+  { token: 'saturday', dayIndex: 6 },
+  { token: 'sunday', dayIndex: 0 },
+];
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -70,27 +90,6 @@ interface ParsedRRule {
   interval: number;
 }
 
-// --- Locale Config Caching ---
-let cachedLocale: { locale: string; hour12: boolean } | null = null;
-
-const loadUserLocale = async (): Promise<void> => {
-  try {
-    // Try to load from Tauri backend
-    const [locale, hour12] = await invoke<[string, boolean]>("get_user_locale");
-    cachedLocale = { locale, hour12 };
-  } catch (error) {
-    // Fall back to browser detection
-    console.warn("Failed to load user locale, using browser default:", error);
-    const userLocale = navigator.language || 'en-US';
-    cachedLocale = { locale: userLocale, hour12: true };
-  }
-};
-
-const getLocaleConfig = (): { locale: string; hour12: boolean } => {
-  // Return cached settings if available, otherwise default
-  return cachedLocale || { locale: navigator.language || 'en-US', hour12: true };
-};
-
 // --- Parse RRULE component into structured object ---
 const parseRRuleComponent = (rrulePart: string): ParsedRRule => {
   const result: ParsedRRule = {
@@ -140,30 +139,39 @@ const parseRRuleComponent = (rrulePart: string): ParsedRRule => {
 };
 
 // --- Day name mapping ---
-const DAY_NAMES: Record<string, string> = {
-  'MO': 'Monday',
-  'TU': 'Tuesday', 
-  'WE': 'Wednesday',
-  'TH': 'Thursday',
-  'FR': 'Friday',
-  'SA': 'Saturday',
-  'SU': 'Sunday'
+const DAY_INDEXES: Record<string, number> = {
+  MO: 1,
+  TU: 2,
+  WE: 3,
+  TH: 4,
+  FR: 5,
+  SA: 6,
+  SU: 0,
+};
+
+const getLocalizedWeekdayName = (code: string): string => {
+  const dayIndex = DAY_INDEXES[code];
+  if (dayIndex === undefined) return code;
+
+  const reference = new Date(2024, 0, 7 + dayIndex);
+  return reference.toLocaleDateString(getLocaleConfig().locale, { weekday: 'long' });
 };
 
 // --- Format recurrence for display ---
 const formatRecurrence = (parsed: ParsedRRule): string | undefined => {
   if (!parsed.freq) return undefined;
+  if (parsed.count !== null && parsed.count <= 1) return undefined;
   
   switch (parsed.freq) {
     case 'DAILY': {
       if (parsed.byDay && parsed.byDay.length === 5 && 
           parsed.byDay.includes('MO') && parsed.byDay.includes('FR')) {
-        return 'Weekdays';
+        return translate('recurrenceWeekdays');
       }
       if (parsed.interval > 1) {
-        return `Every ${parsed.interval} days`;
+        return translate('recurrenceEveryDays', { count: parsed.interval });
       }
-      return 'Daily';
+      return translate('recurrenceDaily');
     }
     
     case 'WEEKLY': {
@@ -171,21 +179,21 @@ const formatRecurrence = (parsed: ParsedRRule): string | undefined => {
         // Check for weekdays pattern
         if (parsed.byDay.length === 5 && 
             ['MO', 'TU', 'WE', 'TH', 'FR'].every(d => parsed.byDay?.includes(d))) {
-          return 'Weekdays';
+          return translate('recurrenceWeekdays');
         }
         // Single day
         if (parsed.byDay.length === 1) {
-          const dayName = DAY_NAMES[parsed.byDay[0]] || parsed.byDay[0];
-          return `Every ${dayName}`;
+          const dayName = getLocalizedWeekdayName(parsed.byDay[0]);
+          return translate('recurrenceEveryDay', { day: dayName });
         }
         // Multiple specific days
-        const dayNames = parsed.byDay.map(d => DAY_NAMES[d] || d).join(', ');
-        return `Weekly (${dayNames})`;
+        const dayNames = parsed.byDay.map((dayCode) => getLocalizedWeekdayName(dayCode)).join(', ');
+        return translate('recurrenceWeeklyDays', { days: dayNames });
       }
       if (parsed.interval > 1) {
-        return `Every ${parsed.interval} weeks`;
+        return translate('recurrenceEveryWeeks', { count: parsed.interval });
       }
-      return 'Weekly';
+      return translate('recurrenceWeekly');
     }
     
     case 'MONTHLY': {
@@ -195,18 +203,20 @@ const formatRecurrence = (parsed: ParsedRRule): string | undefined => {
           const months = parsed.byMonth.map(m => 
             new Date(2000, m - 1).toLocaleDateString(getLocaleConfig().locale, { month: 'short' })
           ).join(', ');
-          return `Monthly ${days} (${months})`;
+          return translate('recurrenceMonthlyDaysMonths', { days, months });
         }
-        return `Monthly (${days})`;
+        return translate('recurrenceMonthlyDays', { days });
       }
       if (parsed.interval > 1) {
-        return `Every ${parsed.interval} months`;
+        return translate('recurrenceEveryMonths', { count: parsed.interval });
       }
-      return 'Monthly';
+      return translate('recurrenceMonthly');
     }
     
     case 'YEARLY':
-      return parsed.interval > 1 ? `Every ${parsed.interval} years` : 'Yearly';
+      return parsed.interval > 1
+        ? translate('recurrenceEveryYears', { count: parsed.interval })
+        : translate('recurrenceYearly');
       
     default:
       return undefined;
@@ -239,9 +249,9 @@ const parseRRule = (rruleStr: string): { dateTag: string; timeTag?: string; recu
   // Determine date tag
   let dateTag: string;
   if (dtstart.toDateString() === today.toDateString()) {
-    dateTag = "Today";
+    dateTag = translate('today');
   } else if (dtstart.toDateString() === tomorrow.toDateString()) {
-    dateTag = "Tomorrow";
+    dateTag = translate('tomorrow');
   } else {
     const daysDiff = Math.floor((dtstart.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
     if (daysDiff >= 0 && daysDiff < 7) {
@@ -270,6 +280,125 @@ const parseRRule = (rruleStr: string): { dateTag: string; timeTag?: string; recu
   }
   
   return { dateTag, timeTag, recurrenceTag };
+};
+
+const parseScheduledTimeIso = (scheduledTimeIso: string): { dateTag: string; timeTag?: string } | null => {
+  if (!scheduledTimeIso) return null;
+
+  const scheduledDate = new Date(scheduledTimeIso);
+  if (Number.isNaN(scheduledDate.getTime())) return null;
+
+  const { locale, hour12 } = getLocaleConfig();
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const startOfScheduled = new Date(scheduledDate.getFullYear(), scheduledDate.getMonth(), scheduledDate.getDate());
+  const tomorrow = new Date(startOfToday);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  let dateTag: string;
+  if (startOfScheduled.getTime() === startOfToday.getTime()) {
+    dateTag = translate('today');
+  } else if (startOfScheduled.getTime() === tomorrow.getTime()) {
+    dateTag = translate('tomorrow');
+  } else {
+    const daysDiff = Math.floor((startOfScheduled.getTime() - startOfToday.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysDiff >= 0 && daysDiff < 7) {
+      dateTag = scheduledDate.toLocaleDateString(locale, { weekday: 'long' });
+    } else {
+      dateTag = scheduledDate.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+    }
+  }
+
+  const timeTag = scheduledDate.toLocaleTimeString(locale, {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12,
+  });
+
+  return { dateTag, timeTag };
+};
+
+const getScheduleTags = (payload: any): { dateTag: string; timeTag?: string; recurrenceTag?: string } | null => {
+  if (payload?.rrule) {
+    return parseRRule(payload.rrule);
+  }
+
+  if (payload?.scheduled_time_iso) {
+    return parseScheduledTimeIso(payload.scheduled_time_iso);
+  }
+
+  return null;
+};
+
+const getScheduleSortKey = (payload: any): string => {
+  if (payload?.scheduled_time_iso) return payload.scheduled_time_iso;
+  if (payload?.rrule) return payload.rrule;
+  return payload?.scheduled_time || '';
+};
+
+const parseRRuleDate = (rruleStr: string): Date | null => {
+  const dtstartMatch = rruleStr.match(/DTSTART:(\d{4})(\d{2})(\d{2})T?(\d{2})?(\d{2})?(\d{2})?/);
+  if (!dtstartMatch) return null;
+
+  const year = parseInt(dtstartMatch[1], 10);
+  const month = parseInt(dtstartMatch[2], 10) - 1;
+  const day = parseInt(dtstartMatch[3], 10);
+  const hour = dtstartMatch[4] ? parseInt(dtstartMatch[4], 10) : 0;
+  const minute = dtstartMatch[5] ? parseInt(dtstartMatch[5], 10) : 0;
+  const second = dtstartMatch[6] ? parseInt(dtstartMatch[6], 10) : 0;
+
+  return new Date(year, month, day, hour, minute, second);
+};
+
+const parseLegacyScheduledTime = (scheduledTime: string): Date | null => {
+  const trimmed = scheduledTime.trim();
+  if (!trimmed) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+    const parsed = new Date(trimmed);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  return null;
+};
+
+const getScheduleDate = (payload: any): Date | null => {
+  if (payload?.scheduled_time_iso) {
+    const parsed = new Date(payload.scheduled_time_iso);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+
+  if (payload?.rrule) {
+    return parseRRuleDate(payload.rrule);
+  }
+
+  if (payload?.scheduled_time) {
+    return parseLegacyScheduledTime(payload.scheduled_time);
+  }
+
+  return null;
+};
+
+const getStartOfDay = (date: Date): Date => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+const formatAbsoluteSchedule = (date: Date): string => {
+  const { locale, hour12 } = getLocaleConfig();
+  return date.toLocaleString(locale, {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12,
+  });
+};
+
+const formatDurationMinutes = (durationMinutes: number): string => {
+  if (durationMinutes < 60) return `${durationMinutes} min`;
+  const hours = Math.floor(durationMinutes / 60);
+  const minutes = durationMinutes % 60;
+  if (minutes === 0) return `${hours}h`;
+  return `${hours}h ${minutes}m`;
 };
 
 // --- Engraved Dark Themes ---
@@ -310,19 +439,65 @@ const Tag = ({ text, type, italic, cardTheme = THEMES.default, glow = false }: {
   return (<span className={cn(baseClasses, colorClass, glow && "ring-1 ring-white/10 shadow-[0_0_10px_rgba(255,255,255,0.05)]")} style={{ borderColor }}>{text}</span>);
 };
 
+const SectionLabel = ({ children }: { children: React.ReactNode }) => (
+  <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-white/30">{children}</div>
+);
+
+const InfoPanel = ({ children, className = '' }: { children: React.ReactNode; className?: string }) => (
+  <div className={cn('flex flex-col gap-1.5', className)}>{children}</div>
+);
+
 // --- Specialized Content ---
 const CommuteSteps = ({ directions }: { directions: any }) => {
   if (!directions) return null;
   if (directions.error || directions.total_duration === 'Enriching...') {
     const isEnriching = directions.total_duration === 'Enriching...' && !directions.error;
-    return (<div className="mt-4 border-t border-white/5 pt-4 flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-500"><span className="text-[10px] font-bold text-blue-400/60 uppercase tracking-widest">Directions Status</span><p className="text-[13px] text-white/50 italic leading-relaxed">{isEnriching ? "Fetching transit data..." : `Service currently unreachable: ${directions.error?.includes('GOOGLE_MAPS_API_KEY') ? 'Configuration error (API Key)' : directions.error}`}</p></div>);
+    return (
+      <InfoPanel className="mt-1">
+        <SectionLabel>{translate('detailDirections')}</SectionLabel>
+        <p className="text-[13px] italic leading-relaxed text-white/55">
+          {isEnriching
+            ? translate('fetchingTransitData')
+            : translate('serviceCurrentlyUnreachable', {
+                error: directions.error?.includes('GOOGLE_MAPS_API_KEY')
+                  ? translate('configurationErrorApiKey')
+                  : directions.error,
+              })}
+        </p>
+      </InfoPanel>
+    );
   }
-  if (!directions.steps || directions.steps.length === 0) return (<div className="mt-4 border-t border-white/5 pt-4 flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-500"><span className="text-[10px] font-bold text-white/30 uppercase tracking-widest">Route Status</span><p className="text-[13px] text-white/50 italic leading-relaxed">No transit routes found for this itinerary.</p></div>);
+  if (!directions.steps || directions.steps.length === 0) {
+    return (
+      <InfoPanel className="mt-1">
+        <SectionLabel>{translate('detailRoute')}</SectionLabel>
+        <p className="text-[13px] italic leading-relaxed text-white/55">{translate('noTransitRoutes')}</p>
+      </InfoPanel>
+    );
+  }
+
   return (
-    <div className="mt-4 border-t border-white/5 pt-4 flex flex-col gap-4 animate-in fade-in slide-in-from-top-2 duration-500">
-      <div className="flex items-center justify-between"><div className="flex flex-col"><span className="text-[10px] font-bold text-white/30 uppercase tracking-widest">Estimated Arrival</span><span className="text-[14px] text-white/90 font-medium">{directions.arrival_time || 'Unknown'}</span></div><div className="flex flex-col items-end"><span className="text-[10px] font-bold text-white/30 uppercase tracking-widest">Total Duration</span><span className="text-[14px] text-white/90 font-medium">{directions.total_duration || 'Unknown'}</span></div></div>
-      <div className="flex flex-col gap-3">{directions.steps.map((step: any, idx: number) => (<div key={idx} className="flex gap-3 items-start"><div className="flex flex-col items-center shrink-0 mt-1"><div className="w-1.5 h-1.5 bg-white/20 rounded-sm" />{idx < directions.steps.length - 1 && <div className="w-0.5 h-full min-h-[16px] bg-white/5 my-1" />}</div><div className="flex-1"><div className="text-[12px] text-white/80 leading-relaxed" dangerouslySetInnerHTML={{ __html: step.instruction }} />{step.travel_mode === 'TRANSIT' && (<div className="flex items-center gap-2 mt-1.5 grayscale opacity-70"><span className="text-[10px] px-1.5 py-0.5 rounded border border-white/10 bg-white/5 text-white capitalize">{step.vehicle_type?.toLowerCase() || 'Transit'}</span><span className="text-[10px] font-bold text-white/40">{step.transit_line}</span></div>)}</div></div>))}</div>
-    </div>
+    <InfoPanel className="mt-1 gap-2">
+      <SectionLabel>{translate('detailDirections')}</SectionLabel>
+      <DetailRow label={translate('detailArrival')} value={directions.arrival_time || translate('unknown')} />
+      <DetailRow label={translate('detailDuration')} value={directions.total_duration || translate('unknown')} />
+      <div className="flex flex-col gap-3">
+        {directions.steps.map((step: any, idx: number) => (
+          <div key={idx} className="flex items-start gap-3 border-b border-white/6 pb-3 last:border-b-0 last:pb-0">
+            <div className="w-4 shrink-0 pt-0.5 text-[11px] font-medium tabular-nums text-white/28">{idx + 1}.</div>
+            <div className="min-w-0">
+              <div className="text-[12px] leading-relaxed text-white/80" dangerouslySetInnerHTML={{ __html: step.instruction }} />
+              {step.travel_mode === 'TRANSIT' && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-white/38">
+                  <span>{step.vehicle_type?.toLowerCase() || translate('transit')}</span>
+                  {step.transit_line && <span>{step.transit_line}</span>}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </InfoPanel>
   );
 };
 
@@ -330,10 +505,38 @@ const CountdownTimer = ({ expiresAt }: { expiresAt: string }) => {
     const [timeLeft, setTimeLeft] = useState("");
     useEffect(() => {
         const target = new Date(expiresAt).getTime();
-        const update = () => { const now = new Date().getTime(); const diff = target - now; if (diff <= 0) { setTimeLeft("EXPIRED"); return; } const mins = Math.floor(diff / 60000); const secs = Math.floor((diff % 60000) / 1000); setTimeLeft(`${mins}:${secs.toString().padStart(2, '0')}`); };
+        const update = () => { const now = new Date().getTime(); const diff = target - now; if (diff <= 0) { setTimeLeft(translate('expired').toUpperCase()); return; } const mins = Math.floor(diff / 60000); const secs = Math.floor((diff % 60000) / 1000); setTimeLeft(`${mins}:${secs.toString().padStart(2, '0')}`); };
         update(); const timer = setInterval(update, 1000); return () => clearInterval(timer);
     }, [expiresAt]);
-    return (<div className="mt-4 flex flex-col items-center py-6 border-y border-white/5 bg-white/[0.02] rounded-lg"><span className="text-[10px] font-bold text-white/30 uppercase tracking-[0.2em] mb-2">Time Remaining</span><span className="text-[42px] font-light tracking-widest text-white/90 tabular-nums font-mono">{timeLeft}</span></div>);
+    return (
+      <InfoPanel className="mt-1">
+        <SectionLabel>{translate('detailTimeRemaining')}</SectionLabel>
+        <span className="font-mono text-[22px] font-light tracking-[0.08em] text-white/88 tabular-nums">{timeLeft}</span>
+      </InfoPanel>
+    );
+};
+
+const DetailRow = ({ label, value }: { label: string; value: string }) => (
+  <div className="flex items-start justify-between gap-4 border-b border-white/6 py-2 last:border-b-0 last:pb-0 first:pt-0">
+    <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-white/34">{label}</span>
+    <span className="text-[13px] text-right leading-relaxed text-white/76">{value}</span>
+  </div>
+);
+
+const DetailGroup = ({ title, rows, tone }: { title: string; rows: Array<{ label: string; value?: string }>; tone?: string }) => {
+  const visibleRows = rows.filter((row) => row.value);
+  if (visibleRows.length === 0) return null;
+
+  return (
+    <InfoPanel className={cn('mt-1', tone)}>
+      <div className="mb-1">
+        <SectionLabel>{title}</SectionLabel>
+      </div>
+      {visibleRows.map((row) => (
+        <DetailRow key={`${title}-${row.label}`} label={row.label} value={row.value!} />
+      ))}
+    </InfoPanel>
+  );
 };
 
 // --- Scope Components ---
@@ -345,27 +548,28 @@ const ScopeBlock = ({ label, type, children }: ScopeBlockProps) => {
 
 // Helper to get day label from date
 const getDayLabelFromDate = (date: Date): string => {
+  const { locale } = getLocaleConfig();
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const tomorrow = new Date(today);
   tomorrow.setDate(tomorrow.getDate() + 1);
   
-  if (date.toDateString() === today.toDateString()) return "Today";
-  if (date.toDateString() === tomorrow.toDateString()) return "Tomorrow";
+  if (date.toDateString() === today.toDateString()) return translate('today');
+  if (date.toDateString() === tomorrow.toDateString()) return translate('tomorrow');
   
   const daysDiff = Math.floor((date.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
   if (daysDiff >= 0 && daysDiff < 7) {
-    return date.toLocaleDateString('en-US', { weekday: 'long' });
+    return date.toLocaleDateString(locale, { weekday: 'long' });
   }
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return date.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
 };
 
 // Updated groupTasks to work with RRULE data
 const groupTasks = (tasks: TaskModel[]) => {
-  const grouped: { 
-    inFocus: TaskModel | null; 
-    days: { [key: string]: TaskModel[] }; 
-    unplanned: TaskModel[] 
+  const grouped: {
+    inFocus: TaskModel | null;
+    days: Record<string, { sortDate: Date; tasks: TaskModel[] }>;
+    unplanned: TaskModel[];
   } = { inFocus: null, days: {}, unplanned: [] };
   
   // First, handle in_focus task
@@ -381,21 +585,15 @@ const groupTasks = (tasks: TaskModel[]) => {
   
   for (const task of regularTasks) {
     const payload = task.payload || {};
-    
-    // Check if task has RRULE scheduling
-    if (payload.rrule) {
-      const dtstartMatch = payload.rrule.match(/DTSTART:(\d{4})(\d{2})(\d{2})/);
-      if (dtstartMatch) {
-        const year = parseInt(dtstartMatch[1], 10);
-        const month = parseInt(dtstartMatch[2], 10) - 1;
-        const day = parseInt(dtstartMatch[3], 10);
-        const scheduledDate = new Date(year, month, day);
-        const dayLabel = getDayLabelFromDate(scheduledDate);
-        
-        if (!grouped.days[dayLabel]) grouped.days[dayLabel] = [];
-        grouped.days[dayLabel].push(task);
-        continue;
+    const scheduledDate = getScheduleDate(payload);
+
+    if (scheduledDate) {
+      const dayLabel = getDayLabelFromDate(scheduledDate);
+      if (!grouped.days[dayLabel]) {
+        grouped.days[dayLabel] = { sortDate: getStartOfDay(scheduledDate), tasks: [] };
       }
+      grouped.days[dayLabel].tasks.push(task);
+      continue;
     }
     
     // Fallback to old scheduled_time parsing for backward compatibility
@@ -406,49 +604,46 @@ const groupTasks = (tasks: TaskModel[]) => {
     }
     
     const lowerTime = time.toLowerCase();
-    let dayLabel = "Today";
+    let dayLabel = translate('today');
     
-    if (lowerTime.includes("tomorrow")) dayLabel = "Tomorrow";
-    else if (lowerTime.includes("monday")) dayLabel = "Monday";
-    else if (lowerTime.includes("tuesday")) dayLabel = "Tuesday";
-    else if (lowerTime.includes("wednesday")) dayLabel = "Wednesday";
-    else if (lowerTime.includes("thursday")) dayLabel = "Thursday";
-    else if (lowerTime.includes("friday")) dayLabel = "Friday";
-    else if (lowerTime.includes("saturday")) dayLabel = "Saturday";
-    else if (lowerTime.includes("sunday")) dayLabel = "Sunday";
-    else if (/^\d{4}-\d{2}-\d{2}/.test(time)) {
-      const d = new Date(time);
-      if (!isNaN(d.getTime())) {
-        dayLabel = d.toLocaleDateString('en-US', { weekday: 'long' });
+    if (lowerTime.includes("tomorrow")) dayLabel = translate('tomorrow');
+    else {
+      const matchedWeekday = LEGACY_WEEKDAY_LABELS.find((entry) => lowerTime.includes(entry.token));
+      if (matchedWeekday) {
+        const reference = new Date(2024, 0, 7 + matchedWeekday.dayIndex);
+        dayLabel = reference.toLocaleDateString(getLocaleConfig().locale, { weekday: 'long' });
+      }
+      else if (/^\d{4}-\d{2}-\d{2}/.test(time)) {
+        const d = new Date(time);
+        if (!isNaN(d.getTime())) {
+          dayLabel = d.toLocaleDateString(getLocaleConfig().locale, { weekday: 'long' });
+        }
       }
     }
     
-    if (!grouped.days[dayLabel]) grouped.days[dayLabel] = [];
-    grouped.days[dayLabel].push(task);
+    if (!grouped.days[dayLabel]) {
+      grouped.days[dayLabel] = { sortDate: new Date(8640000000000000), tasks: [] };
+    }
+    grouped.days[dayLabel].tasks.push(task);
   }
-  
-  // Sort each day group by time
-  const dayOrder = ["Today", "Tomorrow", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
   const orderedDays: { [key: string]: TaskModel[] } = {};
-  
-  dayOrder.forEach(label => { 
-    if (grouped.days[label]) {
-      // Sort by time within each day
-      grouped.days[label].sort((a, b) => {
-        const timeA = a.payload?.rrule || a.payload?.scheduled_time || '';
-        const timeB = b.payload?.rrule || b.payload?.scheduled_time || '';
+  Object.entries(grouped.days)
+    .sort(([, left], [, right]) => left.sortDate.getTime() - right.sortDate.getTime())
+    .forEach(([label, entry]) => {
+      entry.tasks.sort((a, b) => {
+        const dateA = getScheduleDate(a.payload);
+        const dateB = getScheduleDate(b.payload);
+        if (dateA && dateB) return dateA.getTime() - dateB.getTime();
+        if (dateA) return -1;
+        if (dateB) return 1;
+
+        const timeA = getScheduleSortKey(a.payload);
+        const timeB = getScheduleSortKey(b.payload);
         return timeA.localeCompare(timeB);
       });
-      orderedDays[label] = grouped.days[label];
-    }
-  });
-  
-  // Add any remaining days not in dayOrder
-  Object.keys(grouped.days).forEach(label => {
-    if (!orderedDays[label]) orderedDays[label] = grouped.days[label];
-  });
-  
-  grouped.days = orderedDays;
+      orderedDays[label] = entry.tasks;
+    });
   
   // Sort unplanned by creation/payload
   grouped.unplanned.sort((a, b) => {
@@ -457,7 +652,11 @@ const groupTasks = (tasks: TaskModel[]) => {
     return titleA.localeCompare(titleB);
   });
   
-  return grouped;
+  return {
+    inFocus: grouped.inFocus,
+    days: orderedDays,
+    unplanned: grouped.unplanned,
+  };
 };
 
 const TicketCard = ({ task }: { task: TaskModel }) => {
@@ -467,9 +666,10 @@ const TicketCard = ({ task }: { task: TaskModel }) => {
     
     const payload = task.payload || {};
     const isCompleted = payload.completed === true;
-    const title = payload.title || 'Untitled';
+    const title = payload.title || translate('untitled');
     const type = task.type || 'TASK';
     const status = task.status || 'idle';
+    const notes = task.notes || payload.notes || payload.note;
     const isInFocus = status === 'in_focus';
     const showExpanded = isExpanded || isInFocus;
     const theme = type === 'HABIT' ? THEMES.habit : type === 'EVENT' ? THEMES.event : THEMES.default;
@@ -484,9 +684,34 @@ const TicketCard = ({ task }: { task: TaskModel }) => {
     };
     
     // Parse RRULE for display tags
-    const rruleTags = useMemo(() => {
-        return payload.rrule ? parseRRule(payload.rrule) : null;
-    }, [payload.rrule]);
+    const scheduleTags = useMemo(() => {
+      return getScheduleTags(payload);
+    }, [payload]);
+
+    const scheduledDate = useMemo(() => getScheduleDate(payload), [payload]);
+    const durationText = typeof payload.duration_minutes === 'number'
+      ? formatDurationMinutes(payload.duration_minutes)
+      : undefined;
+    const scheduleText = scheduledDate ? formatAbsoluteSchedule(scheduledDate) : undefined;
+    const commuteDays = typeof payload.days === 'string'
+      ? payload.days.split(',').map((day: string) => day.trim()).filter(Boolean).join(', ')
+      : undefined;
+    const scheduleRows = [
+      { label: 'When', value: scheduleText },
+      { label: 'Repeats', value: scheduleTags?.recurrenceTag },
+      { label: 'Duration', value: durationText },
+    ];
+    const commuteRows = [
+      { label: translate('detailFrom'), value: payload.origin },
+      { label: translate('detailTo'), value: payload.destination },
+      { label: translate('detailDeadline'), value: payload.deadline },
+      { label: translate('detailDays'), value: commuteDays },
+      { label: translate('detailRemaining'), value: typeof payload.minutes_remaining === 'number' ? `${payload.minutes_remaining} min` : undefined },
+    ];
+    const countdownRows = [
+      { label: translate('detailExpires'), value: payload.expires_at ? formatAbsoluteSchedule(new Date(payload.expires_at)) : undefined },
+      { label: translate('detailLength'), value: typeof payload.duration_minutes === 'number' ? formatDurationMinutes(payload.duration_minutes) : undefined },
+    ];
     
     return (
         <motion.div 
@@ -504,10 +729,10 @@ const TicketCard = ({ task }: { task: TaskModel }) => {
             <div className="absolute inset-0 rounded-[1rem] flex items-center justify-between px-6 overflow-hidden">
                 <div className="flex items-center gap-2 text-emerald-500/30">
                     <div className="w-1 h-3 bg-emerald-500/20" />
-                    <span className="text-[10px] font-bold uppercase tracking-widest">Complete</span>
+              <span className="text-[10px] font-bold uppercase tracking-widest">{translate('swipeComplete')}</span>
                 </div>
                 <div className="flex items-center gap-2 text-red-500/30">
-                    <span className="text-[10px] font-bold uppercase tracking-widest">Delete</span>
+              <span className="text-[10px] font-bold uppercase tracking-widest">{translate('swipeDelete')}</span>
                     <Trash2 size={18} />
                 </div>
             </div>
@@ -529,48 +754,60 @@ const TicketCard = ({ task }: { task: TaskModel }) => {
                         showExpanded && "rounded-[1.25rem] bg-[#1a1a1a]"
                     )}
                     innerClass={cn(
-                        "p-4 flex flex-col items-stretch",
-                        showExpanded ? "min-h-[100px]" : "flex-row items-center gap-4 py-3"
+                    showExpanded ? "min-h-[100px]" : "px-4 py-3 flex flex-row items-center gap-4"
                     )}
                     checked={isCompleted}
                     shaderColors={theme}
                 >
-                    <div className="flex flex-col w-full">
-                        <div className="min-w-0">
-                            <h3 className={cn(
-                                "font-medium tracking-wide text-[#d1d1d1] truncate transition-all duration-300",
-                                isCompleted && "line-through text-[#555]",
-                                showExpanded ? "text-[18px] text-white" : "text-[15px]"
-                            )}>
-                                {title}
-                            </h3>
-                        </div>
-                        
-                        <div className="flex flex-wrap items-center gap-2 mt-2 opacity-80">
-                            <Tag text={type} type={type.toLowerCase()} cardTheme={theme} glow={isInFocus} />
-                            {rruleTags?.dateTag && <Tag text={rruleTags.dateTag} type="info" cardTheme={theme} />}
-                            {rruleTags?.timeTag && <Tag text={rruleTags.timeTag} type="info" cardTheme={theme} />}
-                            {rruleTags?.recurrenceTag && <Tag text={rruleTags.recurrenceTag} type="info" italic={true} cardTheme={theme} />}
-                        </div>
+                  <div className={cn("flex w-full flex-col", showExpanded && "px-4 pt-4 pb-0")}>
+                    <div className="min-w-0">
+                      <h3 className={cn(
+                        "font-medium tracking-wide text-[#d1d1d1] truncate transition-all duration-300",
+                        isCompleted && "line-through text-[#555]",
+                        showExpanded ? "text-[18px] text-white" : "text-[15px]"
+                      )}>
+                        {title}
+                      </h3>
                     </div>
-                    
+
+                    <div className="flex flex-wrap items-center gap-2 mt-2 opacity-80">
+                      <Tag text={translate(TASK_TYPE_LABELS[type as keyof typeof TASK_TYPE_LABELS] ?? 'taskTypeTask')} type={type.toLowerCase()} cardTheme={theme} glow={isInFocus} />
+                      {scheduleTags?.dateTag && <Tag text={scheduleTags.dateTag} type="info" cardTheme={theme} />}
+                      {scheduleTags?.timeTag && <Tag text={scheduleTags.timeTag} type="info" cardTheme={theme} />}
+                      {scheduleTags?.recurrenceTag && <Tag text={scheduleTags.recurrenceTag} type="info" italic={true} cardTheme={theme} />}
+                    </div>
+                  </div>
+
                     <AnimatePresence>
                         {showExpanded && (
                             <motion.div
                                 initial={{ height: 0, opacity: 0 }}
                                 animate={{ height: "auto", opacity: 1 }}
                                 exit={{ height: 0, opacity: 0 }}
-                                transition={{ duration: 0.3, ease: "easeOut" }}
-                                className="overflow-hidden"
+                                transition={{ duration: 0.24, ease: "easeOut" }}
+                        className="mt-3 overflow-hidden border-t border-white/6 bg-[#181818]"
                             >
-                                <div className="pt-2">
-                                    {type === 'COMMUTE' && <CommuteSteps directions={payload.directions} />}
-                                    {type === 'COUNTDOWN' && <CountdownTimer expiresAt={payload.expires_at} />}
-                                    {payload.note && (
-                                        <div className="mt-4 text-[13px] text-white/60 leading-relaxed font-light italic border-l-2 border-white/5 pl-4 ml-1">
-                                            "{payload.note}"
-                                        </div>
-                                    )}
+                        <div className="px-4 pt-3 pb-4 flex flex-col gap-2.5">
+                                  <DetailGroup title={translate('detailSchedule')} rows={scheduleRows.map((row) => ({
+                                    ...row,
+                                    label: row.label === 'When'
+                                      ? translate('detailWhen')
+                                      : row.label === 'Repeats'
+                                        ? translate('detailRepeats')
+                                        : translate('detailDuration'),
+                                  }))} />
+                                  {type === 'COMMUTE' && <DetailGroup title={translate('detailCommute')} rows={commuteRows} />}
+                                  {type === 'COMMUTE' && <CommuteSteps directions={payload.directions} />}
+                                  {type === 'COUNTDOWN' && <DetailGroup title={translate('detailCountdown')} rows={countdownRows} />}
+                                  {type === 'COUNTDOWN' && payload.expires_at && <CountdownTimer expiresAt={payload.expires_at} />}
+                                  {notes && (
+                                    <InfoPanel className="mt-1">
+                                      <div className="mb-1">
+                                        <SectionLabel>{translate('detailNotes')}</SectionLabel>
+                                      </div>
+                                      <p className="text-[13px] leading-relaxed text-white/68">{notes}</p>
+                                    </InfoPanel>
+                                  )}
                                 </div>
                             </motion.div>
                         )}
@@ -584,9 +821,10 @@ const TicketCard = ({ task }: { task: TaskModel }) => {
 // --- Main App Component ---
 function App() {
     const { tasks, syncNow, isConnected } = useSync();
+  const { t } = useI18n();
     const [inputValue, setInputValue] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
-    const placeholder = "Tell AI to manage your stack...";
+  const placeholder = t('placeholderManageStack');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [integrations] = useState<string[]>([]);
     const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
@@ -606,10 +844,9 @@ function App() {
               setShowSetup(true);
             }
         };
+
         checkOnboarding();
         syncNow();
-        // Load user locale settings on app start
-        loadUserLocale().catch(err => console.warn("Failed to load user locale:", err));
     }, []);
     useEffect(() => { if (drawerRef.current && isHistoryExpanded) { drawerRef.current.scrollTop = drawerRef.current.scrollHeight; } }, [chatHistory, isHistoryExpanded]);
     useEffect(() => { if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.style.height = (inputRef.current.scrollHeight) + 'px'; if (inputValue === '') { inputRef.current.style.height = '48px'; } } }, [inputValue]);
@@ -651,15 +888,15 @@ function App() {
                         </div>
                     </div>
                 </div>
-                <h1 className="text-[28px] font-semibold tracking-[-0.5px]">Hi Antoine,</h1>
-                <p className="subtitle text-[var(--text-secondary)] mt-1.5 text-[14px]">Here is your stack.</p>
+                <h1 className="text-[28px] font-semibold tracking-[-0.5px]">{t('greeting', { name: 'Antoine' })}</h1>
+                <p className="subtitle text-[var(--text-secondary)] mt-1.5 text-[14px]">{t('stackSubtitle')}</p>
             </header>
 
             <section className="stack-container flex-1 overflow-y-auto no-scrollbar pb-4 flex flex-col relative z-10">
-                <div className="px-6 pt-4 flex flex-col"><div className="scope-root flex flex-col pt-2">{tasks.length === 0 ? (<div className="text-[var(--text-secondary)] text-center py-5 text-[13px]">Your stack is empty.</div>) : (
+                <div className="px-6 pt-4 flex flex-col"><div className="scope-root flex flex-col pt-2">{tasks.length === 0 ? (<div className="text-[var(--text-secondary)] text-center py-5 text-[13px]">{t('emptyStack')}</div>) : (
                     (() => {
-                        const grouped = groupTasks(tasks); const dayKeys = Object.keys(grouped.days);
-                        return (<>{grouped.inFocus && (<div className="mb-8"><div className="pl-[2.5px] mb-2 flex items-center h-4"><span className="text-[10px] font-bold uppercase tracking-[1.5px] text-[#3B82F6]">Now in Focus</span></div><TicketCard task={grouped.inFocus} /></div>)}{grouped.unplanned.length > 0 && (<div className={cn("task-list flex flex-col gap-4 px-4 pb-8", dayKeys.length > 0 && "opacity-60 grayscale-[0.5]")}>{grouped.unplanned.map(task => <TicketCard key={task.id} task={task} />)}</div>)}{dayKeys.length > 0 && (<ScopeBlock label="Timeline" type="week">{dayKeys.map(dayLabel => (<ScopeBlock key={dayLabel} label={dayLabel} type="day"><div className="task-list flex flex-col gap-4">{grouped.days[dayLabel].map(task => <TicketCard key={task.id} task={task} />)}</div></ScopeBlock>))}</ScopeBlock>)}</>);
+                    const grouped = groupTasks(tasks); const dayKeys = Object.keys(grouped.days);
+                    return (<>{grouped.inFocus && (<div className="mb-8"><div className="pl-[2.5px] mb-2 flex items-center h-4"><span className="text-[10px] font-bold uppercase tracking-[1.5px] text-[#3B82F6]">{t('nowInFocus')}</span></div><TicketCard task={grouped.inFocus} /></div>)}{grouped.unplanned.length > 0 && (<div className={cn("task-list flex flex-col gap-4 px-4 pb-8", dayKeys.length > 0 && "opacity-60 grayscale-[0.5]")}>{grouped.unplanned.map(task => <TicketCard key={task.id} task={task} />)}</div>)}{dayKeys.length > 0 && (<ScopeBlock label={t('timeline')} type="week">{dayKeys.map(dayLabel => (<ScopeBlock key={dayLabel} label={dayLabel} type="day"><div className="task-list flex flex-col gap-4">{grouped.days[dayLabel].map(task => <TicketCard key={task.id} task={task} />)}</div></ScopeBlock>))}</ScopeBlock>)}</>);
                     })()
                 )}</div></div>
                 <div className="h-[20px] shrink-0" />
@@ -716,7 +953,7 @@ function App() {
                                                         msg.role === 'user' ? "text-white/70 pl-5 border-l border-white/[0.04]" : "text-white/30 italic font-light"
                                                     )}>
                                                         <div className="text-[9px] font-bold uppercase tracking-[0.2em] opacity-30 mb-1.5">
-                                                            {msg.role === 'user' ? 'User' : 'Agent'}
+                                                          {msg.role === 'user' ? t('user') : t('agent')}
                                                         </div>
                                                         {msg.content}
                                                     </div>
@@ -741,7 +978,7 @@ function App() {
                 <div className="relative z-20">
                     <form onSubmit={handleAction} className={cn("chat-input-wrapper flex items-end bg-transparent p-[20px_24px_28px] transition-all duration-400 relative overflow-hidden", isProcessing && "shadow-[inset_0_0_30px_rgba(99,102,241,0.1)]")}>
                         {isProcessing && (<div className="effect-container absolute inset-0 z-0 pointer-events-none overflow-hidden transition-opacity duration-500 opacity-100 scale-150"><div className="pearl-gradient pearl-slow" /><div className="pearl-gradient pearl-fast" /></div>)}
-                        <textarea ref={inputRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAction(); } }} placeholder={interactionState === 'AWAITING_REPLY' ? "Reply to the agent..." : placeholder} className={cn("flex-1 bg-transparent border-none text-[#d1d1d1] text-[14px] outline-none resize-none min-h-[40px] max-h-[120px] leading-[1.6] relative z-10 transition-colors", interactionState === 'AWAITING_REPLY' ? "text-white placeholder:text-white/30" : "placeholder:text-[#555]")} />
+                        <textarea ref={inputRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAction(); } }} placeholder={interactionState === 'AWAITING_REPLY' ? t('placeholderReplyAgent') : placeholder} className={cn("flex-1 bg-transparent border-none text-[#d1d1d1] text-[14px] outline-none resize-none min-h-[40px] max-h-[120px] leading-[1.6] relative z-10 transition-colors", interactionState === 'AWAITING_REPLY' ? "text-white placeholder:text-white/30" : "placeholder:text-[#555]")} />
                         <button type="submit" disabled={isProcessing || !inputValue.trim()} className={cn("send-btn border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30", interactionState === 'AWAITING_REPLY' ? "bg-white text-black shadow-[0_0_15px_rgba(255,255,255,0.2)]" : "bg-white text-black")}><Send size={20} /></button>
                     </form>
                 </div>

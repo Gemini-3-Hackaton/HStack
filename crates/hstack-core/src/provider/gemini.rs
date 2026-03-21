@@ -3,6 +3,8 @@ use crate::error::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+const SKIP_THOUGHT_SIGNATURE_VALIDATOR: &str = "skip_thought_signature_validator";
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiRequest {
@@ -28,6 +30,8 @@ struct GeminiPart {
     function_call: Option<GeminiFunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     function_response: Option<GeminiFunctionResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -86,6 +90,7 @@ pub async fn generate_gemini_content(
                     text: msg.content.clone(),
                     function_call: None,
                     function_response: None,
+                    thought_signature: None,
                 };
                 system_instruction = Some(GeminiContent {
                     role: "user".to_string(),
@@ -97,6 +102,7 @@ pub async fn generate_gemini_content(
                     text: msg.content.clone(),
                     function_call: None,
                     function_response: None,
+                    thought_signature: None,
                 };
                 gemini_contents.push(GeminiContent {
                     role: "user".to_string(),
@@ -110,10 +116,11 @@ pub async fn generate_gemini_content(
                         text: Some(text.clone()),
                         function_call: None,
                         function_response: None,
+                        thought_signature: None,
                     });
                 }
                 if let Some(calls) = &msg.tool_calls {
-                    for call in calls {
+                    for (index, call) in calls.iter().enumerate() {
                         let args_val_result = serde_json::from_str::<Value>(&call.function.arguments);
                         let args_val = match args_val_result {
                             Ok(v) => v,
@@ -126,6 +133,11 @@ pub async fn generate_gemini_content(
                                 args: args_val,
                             }),
                             function_response: None,
+                            thought_signature: if index == 0 {
+                                Some(SKIP_THOUGHT_SIGNATURE_VALIDATOR.to_string())
+                            } else {
+                                None
+                            },
                         });
                     }
                 }
@@ -150,6 +162,7 @@ pub async fn generate_gemini_content(
                         name: msg.name.clone().unwrap_or_default(),
                         response: response_val,
                     }),
+                    thought_signature: None,
                 };
                 gemini_contents.push(GeminiContent {
                     role: "user".to_string(),

@@ -1,7 +1,6 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{de, Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
-use crate::ticket::{Ticket, TicketType, TicketStatus, TicketPayload};
+use crate::ticket::{decode_ticket_payload_for_type, Ticket, TicketType, TicketStatus, TicketPayload};
 use crate::error::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -12,7 +11,7 @@ pub enum SyncActionType {
     Delete,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SyncAction {
     pub action_id: String,
     pub r#type: SyncActionType,
@@ -25,6 +24,59 @@ pub struct SyncAction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub timestamp: String,
+}
+
+#[derive(Deserialize)]
+struct RawSyncAction {
+    action_id: String,
+    #[serde(rename = "type")]
+    r#type: SyncActionType,
+    entity_id: String,
+    entity_type: String,
+    #[serde(default)]
+    status: Option<TicketStatus>,
+    #[serde(default)]
+    payload: Option<serde_json::Value>,
+    #[serde(default)]
+    notes: Option<String>,
+    timestamp: String,
+}
+
+impl<'de> Deserialize<'de> for SyncAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawSyncAction::deserialize(deserializer)?;
+        let payload = match raw.payload {
+            None => None,
+            Some(value) => match raw.r#type {
+                SyncActionType::Create => {
+                    let ticket_type = match raw.entity_type.to_uppercase().as_str() {
+                        "HABIT" => TicketType::Habit,
+                        "EVENT" => TicketType::Event,
+                        "COMMUTE" => TicketType::Commute,
+                        "COUNTDOWN" => TicketType::Countdown,
+                        _ => TicketType::Task,
+                    };
+                    Some(decode_ticket_payload_for_type(&ticket_type, value).map_err(de::Error::custom)?)
+                }
+                SyncActionType::Update => Some(TicketPayload::Generic(value)),
+                SyncActionType::Delete => None,
+            },
+        };
+
+        Ok(SyncAction {
+            action_id: raw.action_id,
+            r#type: raw.r#type,
+            entity_id: raw.entity_id,
+            entity_type: raw.entity_type,
+            status: raw.status,
+            payload,
+            notes: raw.notes,
+            timestamp: raw.timestamp,
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -62,14 +114,12 @@ pub fn reconcile_state(base_tickets: &[Ticket], pending_actions: Vec<SyncAction>
                                 norm_action == norm_base
                             });
                             
-                            let payload_matches = action.payload.as_ref().map_or(true, |p| {
-                                // Since payload is fully typed, we just check equality.
-                                // For merging (Update), we actually merge and then check equality
-                                // of the relevant merged fields, but for now we expect the action's
-                                // payload to be exactly what is requested (which may be a partial Generic 
-                                // update, but that's handled gracefully if we fall back to generic eq).
-                                // But if it's strongly typed, equality implies the update has fully propagated.
-                                p == &t.payload
+                            let payload_matches = action.payload.as_ref().map_or(true, |p| match p {
+                                TicketPayload::Generic(value) => value
+                                    .as_object()
+                                    .map(|updates| t.payload.matches_partial_update(updates))
+                                    .unwrap_or(false),
+                                other => other == &t.payload,
                             });
 
                             // Keep the action if either status or payload or notes doesn't match yet
@@ -134,11 +184,9 @@ pub fn project_state(base_tickets: Vec<Ticket>, actions: &[SyncAction]) -> Vec<T
                     }
                     if let Some(new_payload) = &action.payload {
                         match (&mut ticket.payload, new_payload) {
-                            (TicketPayload::Generic(obj), TicketPayload::Generic(new_obj)) => {
-                                if let (Some(o), Some(n)) = (obj.as_object_mut(), new_obj.as_object()) {
-                                    for (k, v) in n {
-                                        o.insert(k.clone(), v.clone());
-                                    }
+                            (existing_payload, TicketPayload::Generic(new_obj)) => {
+                                if let Some(updates) = new_obj.as_object() {
+                                    existing_payload.apply_partial_update(updates);
                                 }
                             }
                             // Otherwise replace whole payload for simplicity
@@ -255,5 +303,140 @@ mod tests {
 
         let reconciled = reconcile_state(&base_tickets, pending);
         assert_eq!(reconciled.len(), 0);
+    }
+
+    #[test]
+    fn test_project_state_merges_partial_generic_update_into_event_payload() {
+        let base_tickets = vec![Ticket {
+            id: "party-1".to_string(),
+            title: "Untitled".to_string(),
+            r#type: TicketType::Event,
+            status: TicketStatus::Idle,
+            payload: TicketPayload::Event {
+                title: "Untitled".to_string(),
+                scheduled_time_iso: Some("2026-03-21T18:00:00+00:00".to_string()),
+                rrule: Some("DTSTART:20260321T180000Z".to_string()),
+                duration_minutes: None,
+                completed: Some(false),
+            },
+            notes: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        let actions = vec![SyncAction {
+            action_id: "a2".to_string(),
+            r#type: SyncActionType::Update,
+            entity_id: "party-1".to_string(),
+            entity_type: "EVENT".to_string(),
+            status: None,
+            payload: Some(TicketPayload::Generic(serde_json::json!({
+                "title": "Jimbo birthday party"
+            }))),
+            notes: None,
+            timestamp: "now".to_string(),
+        }];
+
+        let projected = project_state(base_tickets, &actions);
+        assert_eq!(projected.len(), 1);
+
+        match &projected[0].payload {
+            TicketPayload::Event { title, scheduled_time_iso, rrule, .. } => {
+                assert_eq!(title, "Jimbo birthday party");
+                assert_eq!(scheduled_time_iso.as_deref(), Some("2026-03-21T18:00:00+00:00"));
+                assert_eq!(rrule.as_deref(), Some("DTSTART:20260321T180000Z"));
+            }
+            other => panic!("expected event payload, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_reconcile_partial_generic_update_when_base_ticket_already_matches() {
+        let base_tickets = vec![Ticket {
+            id: "party-1".to_string(),
+            title: "Jimbo birthday party".to_string(),
+            r#type: TicketType::Event,
+            status: TicketStatus::Idle,
+            payload: TicketPayload::Event {
+                title: "Jimbo birthday party".to_string(),
+                scheduled_time_iso: Some("2026-03-21T18:00:00+00:00".to_string()),
+                rrule: Some("DTSTART:20260321T180000Z".to_string()),
+                duration_minutes: None,
+                completed: Some(false),
+            },
+            notes: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        let pending = vec![SyncAction {
+            action_id: "a3".to_string(),
+            r#type: SyncActionType::Update,
+            entity_id: "party-1".to_string(),
+            entity_type: "EVENT".to_string(),
+            status: None,
+            payload: Some(TicketPayload::Generic(serde_json::json!({
+                "rrule": "DTSTART:20260321T180000Z"
+            }))),
+            notes: None,
+            timestamp: "now".to_string(),
+        }];
+
+        let reconciled = reconcile_state(&base_tickets, pending);
+        assert!(reconciled.is_empty());
+    }
+
+    #[test]
+    fn test_deserialized_create_and_update_actions_preserve_scheduled_event_fields() {
+        let create_action: SyncAction = serde_json::from_value(serde_json::json!({
+            "action_id": "create-yoga",
+            "type": "CREATE",
+            "entity_id": "yoga-1",
+            "entity_type": "EVENT",
+            "payload": {
+                "title": "Yoga",
+                "duration_minutes": 60
+            },
+            "status": "idle",
+            "timestamp": "2026-03-20T22:26:42.489738+00:00"
+        }))
+        .expect("create action should deserialize");
+
+        let update_action: SyncAction = serde_json::from_value(serde_json::json!({
+            "action_id": "update-yoga",
+            "type": "UPDATE",
+            "entity_id": "yoga-1",
+            "entity_type": "EVENT",
+            "payload": {
+                "rrule": null,
+                "scheduled_time_iso": "2026-03-26T09:00:00+00:00"
+            },
+            "timestamp": "2026-03-20T22:31:07.811231+00:00"
+        }))
+        .expect("update action should deserialize");
+
+        let projected = project_state(vec![], &[create_action, update_action]);
+        assert_eq!(projected.len(), 1);
+
+        let ticket = &projected[0];
+        assert_eq!(ticket.title, "Yoga");
+        assert_eq!(ticket.r#type, TicketType::Event);
+
+        match &ticket.payload {
+            TicketPayload::Event {
+                title,
+                scheduled_time_iso,
+                rrule,
+                duration_minutes,
+                completed,
+            } => {
+                assert_eq!(title, "Yoga");
+                assert_eq!(scheduled_time_iso.as_deref(), Some("2026-03-26T09:00:00+00:00"));
+                assert_eq!(rrule, &None);
+                assert_eq!(duration_minutes, &Some(60));
+                assert_eq!(completed, &None);
+            }
+            other => panic!("expected event payload, got {:?}", other),
+        }
     }
 }

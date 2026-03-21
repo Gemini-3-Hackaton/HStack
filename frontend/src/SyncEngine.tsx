@@ -1,6 +1,14 @@
-import { useState, useEffect, useCallback, createContext, ReactNode, useContext, useRef } from 'react';
+import { useState, useEffect, useCallback, createContext, ReactNode, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { invoke } from '@tauri-apps/api/core';
+import {
+  SYNC_CONFIG_UPDATED_EVENT,
+  buildApiUrl,
+  resolveRemoteSyncConfig,
+  type SyncMode,
+  type SyncSessionInfo,
+  type UserSettingsShape,
+} from './syncConfig';
 
 export type TicketType = 'HABIT' | 'EVENT' | 'TASK' | 'COMMUTE' | 'COUNTDOWN';
 export type TicketStatus = 'idle' | 'in_focus' | 'completed' | 'expired';
@@ -11,6 +19,7 @@ export interface TaskModel {
   type: TicketType;
   status: TicketStatus;
   payload: any;
+  notes?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -37,7 +46,12 @@ interface SyncContextType {
   syncNow: () => Promise<void>;
 }
 
-const SyncContext = createContext<SyncContextType | undefined>(undefined);
+interface SyncSettings extends UserSettingsShape {
+  sync_mode: SyncMode;
+  custom_server_url: string | null;
+}
+
+export const SyncContext = createContext<SyncContextType | undefined>(undefined);
 
 // Hash function replica (using Web Crypto API)
 async function sha256(message: string): Promise<string> {
@@ -72,9 +86,37 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
   const wsRef = useRef<WebSocket | null>(null);
   const tasksRef = useRef<TaskModel[]>([]);
   const historyRef = useRef<SyncAction[]>([]);
+  const [syncSettings, setSyncSettings] = useState<SyncSettings | null>(null);
+  const [syncSession, setSyncSession] = useState<SyncSessionInfo | null>(null);
+
+  const loadSyncConfig = useCallback(async () => {
+    try {
+      const [settings, session] = await Promise.all([
+        invoke<SyncSettings>('get_settings'),
+        invoke<SyncSessionInfo>('get_sync_session'),
+      ]);
+      setSyncSettings(settings);
+      setSyncSession(session);
+    } catch (error) {
+      console.error('Failed to load sync configuration:', error);
+    }
+  }, []);
 
   useEffect(() => { tasksRef.current = tasks; }, [tasks]);
   useEffect(() => { historyRef.current = localHistory; }, [localHistory]);
+
+  useEffect(() => {
+    const handleSyncConfigUpdated = () => {
+      void loadSyncConfig();
+    };
+
+    void loadSyncConfig();
+    window.addEventListener(SYNC_CONFIG_UPDATED_EVENT, handleSyncConfigUpdated);
+
+    return () => {
+      window.removeEventListener(SYNC_CONFIG_UPDATED_EVENT, handleSyncConfigUpdated);
+    };
+  }, [loadSyncConfig]);
 
   // Load from local storage initially
   useEffect(() => {
@@ -96,9 +138,14 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
 
   // Initialize WebSocket sync sequence
   useEffect(() => {
+    if (!syncSettings || !syncSession) return;
+
     let reconnectTimer: any;
+    const remoteConfig = resolveRemoteSyncConfig(syncSettings, syncSession);
+    const websocketUrl = remoteConfig?.wsUrl || `ws://127.0.0.1:8000/ws/sync/${userId}`;
+
     const connect = async () => {
-      const ws = new WebSocket(`ws://127.0.0.1:8000/ws/sync/${userId}`);
+      const ws = new WebSocket(websocketUrl);
       wsRef.current = ws;
 
       ws.onopen = async () => {
@@ -114,12 +161,12 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
           
           if (data.type === 'ACK') {
             console.log("In Sync with Server");
-            if (localHistory.length > 0) flushHistory();
+            if (historyRef.current.length > 0) flushHistory();
           } 
           else if (data.type === 'OUT_OF_SYNC') {
             console.log("Out of Sync, fetching full state...");
             await fetchFullState();
-            if (localHistory.length > 0) flushHistory();
+            if (historyRef.current.length > 0) flushHistory();
           }
           else if (data.type === 'SYNC_ACK') {
              // Remove actions from local history that were acknowledged
@@ -156,26 +203,44 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
       clearTimeout(reconnectTimer);
       if (wsRef.current) wsRef.current.close();
     };
-  }, [userId]);
+  }, [syncSettings, syncSession, userId]);
 
 
   const flushHistory = () => {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && localHistory.length > 0) {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && historyRef.current.length > 0) {
           wsRef.current.send(JSON.stringify({
               type: 'SYNC_ACTIONS',
-              actions: localHistory
+          actions: historyRef.current
           }));
       }
   };
 
   const fetchFullState = async () => {
+      const remoteConfig = syncSettings && syncSession ? resolveRemoteSyncConfig(syncSettings, syncSession) : null;
+
       try {
-          // Primary source: Tauri/Rust backend (Projected State)
+        if (!remoteConfig) {
           const fullTasks = await invoke<TaskModel[]>("get_tasks");
           persistState(fullTasks, localHistory);
           console.log("State refreshed from Rust backend");
+          return;
+        }
+
+        const res = await fetch(buildApiUrl(remoteConfig.baseUrl, '/api/tasks'), {
+          headers: {
+            Authorization: `Bearer ${remoteConfig.token}`,
+          },
+        });
+
+        if (!res.ok) {
+          throw new Error(`Remote task fetch failed: ${res.status}`);
+        }
+
+        const fullTasks = await res.json();
+        persistState(fullTasks, localHistory);
+        console.log('State refreshed from remote server');
       } catch (err) {
-          console.warn("Tauri fetch failed, trying server...", err);
+        console.warn("Primary sync fetch failed, trying legacy server fallback...", err);
           try {
               const res = await fetch(`http://localhost:8000/api/tasks?userid=${userId}`);
               if (res.ok) {
@@ -212,7 +277,7 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
     if (action.type === 'CREATE') {
         newTasks.push({ 
             id: action.entity_id, 
-            title: action.payload?.title || 'Untitled',
+        title: action.payload?.title || '',
             type: action.entity_type as TicketType, 
             payload: action.payload,
             status: action.status || 'idle'
@@ -259,8 +324,3 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
   );
 };
 
-export const useSync = () => {
-  const ctx = useContext(SyncContext);
-  if (!ctx) throw new Error("useSync must be used within SyncProvider");
-  return ctx;
-};
