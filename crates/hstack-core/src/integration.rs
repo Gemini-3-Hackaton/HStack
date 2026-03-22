@@ -1,3 +1,5 @@
+// Shared integration contract types.
+// Review docs/public-private-contract.md before widening this surface for private-only infrastructure needs.
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
