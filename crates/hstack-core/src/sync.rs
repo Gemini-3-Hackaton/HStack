@@ -260,6 +260,8 @@ mod tests {
                 scheduled_time_iso: None,
                 rrule: None,
                 duration_minutes: None,
+                status: None,
+                priority: None,
                 completed: Some(false),
             }),
             notes: None,
@@ -278,6 +280,8 @@ mod tests {
             scheduled_time_iso: None,
             rrule: None,
             duration_minutes: None,
+            status: None,
+            priority: None,
             completed: Some(false),
         };
         let base_tickets = vec![Ticket {
@@ -317,6 +321,9 @@ mod tests {
                 scheduled_time_iso: Some("2026-03-21T18:00:00+00:00".to_string()),
                 rrule: Some("DTSTART:20260321T180000Z".to_string()),
                 duration_minutes: None,
+                location: None,
+                status: None,
+                priority: None,
                 completed: Some(false),
             },
             notes: None,
@@ -341,10 +348,12 @@ mod tests {
         assert_eq!(projected.len(), 1);
 
         match &projected[0].payload {
-            TicketPayload::Event { title, scheduled_time_iso, rrule, .. } => {
+            TicketPayload::Event { title, scheduled_time_iso, rrule, status, priority, .. } => {
                 assert_eq!(title, "Jimbo birthday party");
                 assert_eq!(scheduled_time_iso.as_deref(), Some("2026-03-21T18:00:00+00:00"));
                 assert_eq!(rrule.as_deref(), Some("DTSTART:20260321T180000Z"));
+                assert_eq!(status, &None);
+                assert_eq!(priority, &None);
             }
             other => panic!("expected event payload, got {:?}", other),
         }
@@ -362,6 +371,9 @@ mod tests {
                 scheduled_time_iso: Some("2026-03-21T18:00:00+00:00".to_string()),
                 rrule: Some("DTSTART:20260321T180000Z".to_string()),
                 duration_minutes: None,
+                location: None,
+                status: None,
+                priority: None,
                 completed: Some(false),
             },
             notes: None,
@@ -428,12 +440,18 @@ mod tests {
                 scheduled_time_iso,
                 rrule,
                 duration_minutes,
+                location,
+                status,
+                priority,
                 completed,
             } => {
                 assert_eq!(title, "Yoga");
                 assert_eq!(scheduled_time_iso.as_deref(), Some("2026-03-26T09:00:00+00:00"));
                 assert_eq!(rrule, &None);
                 assert_eq!(duration_minutes, &Some(60));
+                assert_eq!(location, &None);
+                assert_eq!(status, &None);
+                assert_eq!(priority, &None);
                 assert_eq!(completed, &None);
             }
             other => panic!("expected event payload, got {:?}", other),
