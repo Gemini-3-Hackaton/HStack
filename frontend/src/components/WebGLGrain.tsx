@@ -1,11 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-interface GrainColors {
-  c1: number[];
-  c2: number[];
-  c3: number[];
-  c4: number[];
-}
+import { GrainFallback, type GrainColors } from './GrainFallback';
 
 interface WebGLGrainProps {
   colors?: GrainColors;
@@ -32,6 +27,7 @@ export const WebGLGrain = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const latestPropsRef = useRef({ colors, spreadX, spreadY, contrast, noiseFactor });
   const renderRef = useRef<(() => void) | null>(null);
+  const [showFallback, setShowFallback] = useState(false);
 
   useEffect(() => {
     latestPropsRef.current = { colors, spreadX, spreadY, contrast, noiseFactor };
@@ -41,6 +37,8 @@ export const WebGLGrain = ({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    let disposed = false;
 
     const vsSource = `
       attribute vec2 position;
@@ -89,9 +87,22 @@ export const WebGLGrain = ({
 
     let cleanupScene: (() => void) | null = null;
 
+    const activateFallback = (reason: string, detail?: string | null) => {
+      if (disposed) return;
+      console.warn('WebGLGrain fallback activated:', reason, detail ?? '');
+      cleanupScene?.();
+      cleanupScene = null;
+      renderRef.current = null;
+      setShowFallback(true);
+    };
+
     const initializeScene = () => {
-      const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-      if (!gl || !(gl instanceof WebGLRenderingContext)) return;
+      const gl = canvas.getContext('webgl', { antialias: false, depth: false, stencil: false })
+        || canvas.getContext('experimental-webgl', { antialias: false, depth: false, stencil: false });
+      if (!gl || !(gl instanceof WebGLRenderingContext)) {
+        activateFallback('context-unavailable');
+        return;
+      }
 
       const compileShader = (type: number, source: string) => {
         const shader = gl.createShader(type);
@@ -99,7 +110,7 @@ export const WebGLGrain = ({
         gl.shaderSource(shader, source);
         gl.compileShader(shader);
         if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-          console.error('Failed to compile WebGLGrain shader:', gl.getShaderInfoLog(shader));
+          activateFallback('shader-compile-failed', gl.getShaderInfoLog(shader));
           gl.deleteShader(shader);
           return null;
         }
@@ -111,12 +122,17 @@ export const WebGLGrain = ({
       if (!vs || !fs) return;
 
       const prog = gl.createProgram();
-      if (!prog) return;
+      if (!prog) {
+        activateFallback('program-create-failed');
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+        return;
+      }
       gl.attachShader(prog, vs);
       gl.attachShader(prog, fs);
       gl.linkProgram(prog);
       if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-        console.error('Failed to link WebGLGrain program:', gl.getProgramInfoLog(prog));
+        activateFallback('program-link-failed', gl.getProgramInfoLog(prog));
         gl.deleteProgram(prog);
         gl.deleteShader(vs);
         gl.deleteShader(fs);
@@ -126,6 +142,7 @@ export const WebGLGrain = ({
 
       const buffer = gl.createBuffer();
       if (!buffer) {
+        activateFallback('buffer-create-failed');
         gl.deleteProgram(prog);
         gl.deleteShader(vs);
         gl.deleteShader(fs);
@@ -179,7 +196,14 @@ export const WebGLGrain = ({
       const ro = new ResizeObserver(render);
       ro.observe(canvas);
       renderRef.current = render;
-      render();
+      try {
+        render();
+        setShowFallback(false);
+      } catch (error) {
+        ro.disconnect();
+        activateFallback('render-failed', error instanceof Error ? error.message : String(error));
+        return;
+      }
 
       cleanupScene = () => {
         renderRef.current = null;
@@ -193,8 +217,7 @@ export const WebGLGrain = ({
 
     const handleContextLost = (event: Event) => {
       event.preventDefault();
-      cleanupScene?.();
-      cleanupScene = null;
+      activateFallback('context-lost');
     };
 
     const handleContextRestored = () => {
@@ -203,17 +226,33 @@ export const WebGLGrain = ({
       initializeScene();
     };
 
+    const handleContextCreationError = () => {
+      activateFallback('context-creation-error');
+    };
+
     canvas.addEventListener('webglcontextlost', handleContextLost, false);
     canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
+    canvas.addEventListener('webglcontextcreationerror', handleContextCreationError as EventListener, false);
     initializeScene();
 
     return () => {
+      disposed = true;
       canvas.removeEventListener('webglcontextlost', handleContextLost, false);
       canvas.removeEventListener('webglcontextrestored', handleContextRestored, false);
+      canvas.removeEventListener('webglcontextcreationerror', handleContextCreationError as EventListener, false);
       cleanupScene?.();
       cleanupScene = null;
     };
   }, []);
 
-  return <canvas ref={canvasRef} style={{ opacity }} className="absolute inset-0 w-full h-full pointer-events-none z-0" />;
+  return (
+    <>
+      {showFallback ? <GrainFallback colors={colors} opacity={opacity} /> : null}
+      <canvas
+        ref={canvasRef}
+        style={{ opacity, display: showFallback ? 'none' : 'block' }}
+        className="absolute inset-0 w-full h-full pointer-events-none z-0"
+      />
+    </>
+  );
 };

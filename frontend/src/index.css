@@ -101,3 +101,27 @@
     from { opacity: 0; transform: translateY(-8px); }
     to { opacity: 1; transform: translateY(0); }
 }
+
+@keyframes grain-fallback-shift {
+    0% { transform: scale(1.04) translate3d(-1.5%, -1%, 0); }
+    50% { transform: scale(1.08) translate3d(1.25%, 0.75%, 0); }
+    100% { transform: scale(1.05) translate3d(-0.75%, 1%, 0); }
+}
+
+@keyframes grain-fallback-noise {
+    0% { transform: translate3d(0, 0, 0); }
+    25% { transform: translate3d(0.5%, -0.5%, 0); }
+    50% { transform: translate3d(-0.75%, 0.35%, 0); }
+    75% { transform: translate3d(0.35%, 0.6%, 0); }
+    100% { transform: translate3d(0, 0, 0); }
+}
+
+.grain-fallback-shift {
+    animation: grain-fallback-shift 12s ease-in-out infinite alternate;
+    will-change: transform;
+}
+
+.grain-fallback-noise {
+    animation: grain-fallback-noise 420ms steps(2, end) infinite;
+    will-change: transform;
+}

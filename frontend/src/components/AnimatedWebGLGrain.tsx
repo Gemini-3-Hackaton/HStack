@@ -1,11 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-interface GrainColors {
-  c1: number[];
-  c2: number[];
-  c3: number[];
-  c4: number[];
-}
+import { GrainFallback, type GrainColors } from './GrainFallback';
 
 interface AnimatedWebGLGrainProps {
   colors: GrainColors;
@@ -41,6 +36,7 @@ export const AnimatedWebGLGrain = ({
 }: AnimatedWebGLGrainProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const latestPropsRef = useRef({ colors, animatedPalette, spreadX, spreadY, contrast, noiseFactor });
+  const [showFallback, setShowFallback] = useState(false);
 
   useEffect(() => {
     latestPropsRef.current = { colors, animatedPalette, spreadX, spreadY, contrast, noiseFactor };
@@ -50,8 +46,16 @@ export const AnimatedWebGLGrain = ({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-    if (!gl || !(gl instanceof WebGLRenderingContext)) return;
+    let disposed = false;
+    let cleanupScene: (() => void) | null = null;
+
+    const activateFallback = (reason: string, detail?: string | null) => {
+      if (disposed) return;
+      console.warn('AnimatedWebGLGrain fallback activated:', reason, detail ?? '');
+      cleanupScene?.();
+      cleanupScene = null;
+      setShowFallback(true);
+    };
 
     const vsSource = `
       attribute vec2 position;
@@ -98,107 +102,178 @@ export const AnimatedWebGLGrain = ({
       }
     `;
 
-    const compileShader = (type: number, source: string) => {
-      const shader = gl.createShader(type);
-      if (!shader) return null;
-      gl.shaderSource(shader, source);
-      gl.compileShader(shader);
-      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        console.error('Failed to compile AnimatedWebGLGrain shader:', gl.getShaderInfoLog(shader));
-        gl.deleteShader(shader);
-        return null;
+    const initializeScene = () => {
+      const gl = canvas.getContext('webgl', { antialias: false, depth: false, stencil: false })
+        || canvas.getContext('experimental-webgl', { antialias: false, depth: false, stencil: false });
+      if (!gl || !(gl instanceof WebGLRenderingContext)) {
+        activateFallback('context-unavailable');
+        return;
       }
-      return shader;
+
+      const compileShader = (type: number, source: string) => {
+        const shader = gl.createShader(type);
+        if (!shader) return null;
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+          activateFallback('shader-compile-failed', gl.getShaderInfoLog(shader));
+          gl.deleteShader(shader);
+          return null;
+        }
+        return shader;
+      };
+
+      const vs = compileShader(gl.VERTEX_SHADER, vsSource);
+      const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
+      if (!vs || !fs) return;
+
+      const prog = gl.createProgram();
+      if (!prog) {
+        activateFallback('program-create-failed');
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+        return;
+      }
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        activateFallback('program-link-failed', gl.getProgramInfoLog(prog));
+        gl.deleteProgram(prog);
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+        return;
+      }
+      gl.useProgram(prog);
+
+      const buffer = gl.createBuffer();
+      if (!buffer) {
+        activateFallback('buffer-create-failed');
+        gl.deleteProgram(prog);
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+        return;
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+
+      const posAttr = gl.getAttribLocation(prog, 'position');
+      gl.enableVertexAttribArray(posAttr);
+      gl.vertexAttribPointer(posAttr, 2, gl.FLOAT, false, 0, 0);
+
+      const resUni = gl.getUniformLocation(prog, 'resolution');
+      const uC1 = gl.getUniformLocation(prog, 'c1');
+      const uC2 = gl.getUniformLocation(prog, 'c2');
+      const uC3 = gl.getUniformLocation(prog, 'c3');
+      const uC4 = gl.getUniformLocation(prog, 'c4');
+      const uSpreadX = gl.getUniformLocation(prog, 'spreadX');
+      const uSpreadY = gl.getUniformLocation(prog, 'spreadY');
+      const uContrast = gl.getUniformLocation(prog, 'contrast');
+      const uNoiseFactor = gl.getUniformLocation(prog, 'noiseFactor');
+
+      let animationFrame: number | null = null;
+
+      const render = () => {
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+
+        const active = latestPropsRef.current;
+        const durationMs = active.animatedPalette.durationMs ?? 5200;
+        const elapsed = performance.now() % durationMs;
+        const phase = elapsed / durationMs;
+        const amount = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
+        const palette = lerpColors(active.animatedPalette.from, active.animatedPalette.to, amount);
+
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.uniform2f(resUni, canvas.width, canvas.height);
+        gl.uniform3f(uC1, palette.c1[0] / 255, palette.c1[1] / 255, palette.c1[2] / 255);
+        gl.uniform3f(uC2, palette.c2[0] / 255, palette.c2[1] / 255, palette.c2[2] / 255);
+        gl.uniform3f(uC3, palette.c3[0] / 255, palette.c3[1] / 255, palette.c3[2] / 255);
+        gl.uniform3f(uC4, palette.c4[0] / 255, palette.c4[1] / 255, palette.c4[2] / 255);
+        gl.uniform1f(uSpreadX, active.spreadX);
+        gl.uniform1f(uSpreadY, active.spreadY);
+        gl.uniform1f(uContrast, active.contrast);
+        gl.uniform1f(uNoiseFactor, active.noiseFactor);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+      };
+
+      const loop = () => {
+        try {
+          render();
+        } catch (error) {
+          activateFallback('render-failed', error instanceof Error ? error.message : String(error));
+          return;
+        }
+        animationFrame = window.requestAnimationFrame(loop);
+      };
+
+      const ro = new ResizeObserver(render);
+      ro.observe(canvas);
+      try {
+        render();
+        setShowFallback(false);
+        animationFrame = window.requestAnimationFrame(loop);
+      } catch (error) {
+        ro.disconnect();
+        activateFallback('render-failed', error instanceof Error ? error.message : String(error));
+        return;
+      }
+
+      cleanupScene = () => {
+        ro.disconnect();
+        if (animationFrame !== null) {
+          window.cancelAnimationFrame(animationFrame);
+          animationFrame = null;
+        }
+        gl.deleteBuffer(buffer);
+        gl.deleteProgram(prog);
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+      };
     };
 
-    const vs = compileShader(gl.VERTEX_SHADER, vsSource);
-    const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
-    if (!vs || !fs) return;
-
-    const prog = gl.createProgram();
-    if (!prog) return;
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      console.error('Failed to link AnimatedWebGLGrain program:', gl.getProgramInfoLog(prog));
-      gl.deleteProgram(prog);
-      gl.deleteShader(vs);
-      gl.deleteShader(fs);
-      return;
-    }
-    gl.useProgram(prog);
-
-    const buffer = gl.createBuffer();
-    if (!buffer) return;
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
-
-    const posAttr = gl.getAttribLocation(prog, 'position');
-    gl.enableVertexAttribArray(posAttr);
-    gl.vertexAttribPointer(posAttr, 2, gl.FLOAT, false, 0, 0);
-
-    const resUni = gl.getUniformLocation(prog, 'resolution');
-    const uC1 = gl.getUniformLocation(prog, 'c1');
-    const uC2 = gl.getUniformLocation(prog, 'c2');
-    const uC3 = gl.getUniformLocation(prog, 'c3');
-    const uC4 = gl.getUniformLocation(prog, 'c4');
-    const uSpreadX = gl.getUniformLocation(prog, 'spreadX');
-    const uSpreadY = gl.getUniformLocation(prog, 'spreadY');
-    const uContrast = gl.getUniformLocation(prog, 'contrast');
-    const uNoiseFactor = gl.getUniformLocation(prog, 'noiseFactor');
-
-    let animationFrame: number | null = null;
-
-    const render = () => {
-      const rect = canvas.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return;
-
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-
-      const active = latestPropsRef.current;
-      const durationMs = active.animatedPalette.durationMs ?? 5200;
-      const elapsed = performance.now() % durationMs;
-      const phase = elapsed / durationMs;
-      const amount = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
-      const palette = lerpColors(active.animatedPalette.from, active.animatedPalette.to, amount);
-
-      gl.viewport(0, 0, canvas.width, canvas.height);
-      gl.uniform2f(resUni, canvas.width, canvas.height);
-      gl.uniform3f(uC1, palette.c1[0] / 255, palette.c1[1] / 255, palette.c1[2] / 255);
-      gl.uniform3f(uC2, palette.c2[0] / 255, palette.c2[1] / 255, palette.c2[2] / 255);
-      gl.uniform3f(uC3, palette.c3[0] / 255, palette.c3[1] / 255, palette.c3[2] / 255);
-      gl.uniform3f(uC4, palette.c4[0] / 255, palette.c4[1] / 255, palette.c4[2] / 255);
-      gl.uniform1f(uSpreadX, active.spreadX);
-      gl.uniform1f(uSpreadY, active.spreadY);
-      gl.uniform1f(uContrast, active.contrast);
-      gl.uniform1f(uNoiseFactor, active.noiseFactor);
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      activateFallback('context-lost');
     };
 
-    const loop = () => {
-      render();
-      animationFrame = window.requestAnimationFrame(loop);
+    const handleContextRestored = () => {
+      cleanupScene?.();
+      cleanupScene = null;
+      initializeScene();
     };
 
-    const ro = new ResizeObserver(render);
-    ro.observe(canvas);
-    render();
-    animationFrame = window.requestAnimationFrame(loop);
+    const handleContextCreationError = () => {
+      activateFallback('context-creation-error');
+    };
+
+    canvas.addEventListener('webglcontextlost', handleContextLost, false);
+    canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
+    canvas.addEventListener('webglcontextcreationerror', handleContextCreationError as EventListener, false);
+    initializeScene();
 
     return () => {
-      ro.disconnect();
-      if (animationFrame !== null) {
-        window.cancelAnimationFrame(animationFrame);
-      }
-      gl.deleteBuffer(buffer);
-      gl.deleteProgram(prog);
-      gl.deleteShader(vs);
-      gl.deleteShader(fs);
+      disposed = true;
+      canvas.removeEventListener('webglcontextlost', handleContextLost, false);
+      canvas.removeEventListener('webglcontextrestored', handleContextRestored, false);
+      canvas.removeEventListener('webglcontextcreationerror', handleContextCreationError as EventListener, false);
+      cleanupScene?.();
+      cleanupScene = null;
     };
   }, []);
 
-  return <canvas ref={canvasRef} style={{ opacity }} className="absolute inset-0 w-full h-full pointer-events-none z-0" />;
+  return (
+    <>
+      {showFallback ? <GrainFallback colors={colors} opacity={opacity} animated /> : null}
+      <canvas
+        ref={canvasRef}
+        style={{ opacity, display: showFallback ? 'none' : 'block' }}
+        className="absolute inset-0 w-full h-full pointer-events-none z-0"
+      />
+    </>
+  );
 };
