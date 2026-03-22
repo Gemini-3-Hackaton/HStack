@@ -511,7 +511,13 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                         spreadX={0.35} spreadY={1.1} contrast={2.0} noiseFactor={0.7} opacity={1.0}
                     />
 
-                    <div className="relative z-20 h-full flex flex-col p-6 pt-12">
+                    <div
+                        className="relative z-20 h-full flex flex-col p-6 pt-12"
+                        style={{
+                            paddingTop: 'calc(48px + env(safe-area-inset-top, 0px))',
+                            paddingBottom: 'calc(24px + env(safe-area-inset-bottom, 0px))',
+                        }}
+                    >
                         {/* Header */}
                         <div className="flex items-center justify-between mb-8 shrink-0" data-tauri-drag-region>
                             <div className="flex items-center gap-3 pointer-events-none" data-tauri-drag-region>

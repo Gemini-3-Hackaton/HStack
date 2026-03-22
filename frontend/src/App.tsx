@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { SyncProvider, TaskModel } from "./SyncEngine";
 import { useSync } from "./useSync";
-import { Send, ChevronDown, Plus, Trash2, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink } from "lucide-react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Send, ChevronDown, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { WebGLGrain } from "./components/WebGLGrain";
@@ -14,7 +14,6 @@ import { translate, useI18n } from "./i18n";
 import {
   type SavedLocationRecord,
   type SavedLocationIndex,
-  buildAppleMapsUrl,
   buildGoogleMapsEmbedUrl,
   buildGoogleMapsUrl,
   formatAbsoluteSchedule,
@@ -26,6 +25,7 @@ import {
   groupTasks,
   resolveStructuredLocation,
 } from "./taskPresentation";
+import { canUseDesktopWindowControls, minimizeDesktopWindow, startDesktopWindowDrag } from "./platform";
 
 const TASK_TYPE_LABELS = {
   TASK: 'taskTypeTask',
@@ -145,29 +145,29 @@ const FactGrid = ({ items }: { items: Array<{ label: string; value?: string }> }
   );
 };
 
-const MapLinkRow = ({ googleUrl, appleUrl }: { googleUrl?: string; appleUrl?: string }) => {
-  if (!googleUrl && !appleUrl) return null;
+const MapLinkRow = ({ googleUrl }: { googleUrl?: string }) => {
+  if (!googleUrl) return null;
 
-  const links = [
-    { href: googleUrl, label: translate('openInGoogleMaps') },
-    { href: appleUrl, label: translate('openInAppleMaps') },
-  ].filter((link): link is { href: string; label: string } => Boolean(link.href));
+  const handleOpen = async (event: React.MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+
+    try {
+      await openUrl(googleUrl);
+    } catch (error) {
+      console.error('Failed to open Google Maps link:', error);
+    }
+  };
 
   return (
     <div className="mt-1 flex flex-wrap gap-2">
-      {links.map((link) => (
-        <a
-          key={link.label}
-          href={link.href}
-          target="_blank"
-          rel="noreferrer"
-          onClick={(event) => event.stopPropagation()}
-          className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-white/74 transition-colors hover:bg-white/[0.08]"
-        >
-          <ExternalLink size={12} />
-          {link.label}
-        </a>
-      ))}
+      <button
+        type="button"
+        onClick={handleOpen}
+        className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-white/74 transition-colors hover:bg-white/[0.08]"
+      >
+        <ExternalLink size={12} />
+        {translate('openInGoogleMaps')}
+      </button>
     </div>
   );
 };
@@ -292,10 +292,7 @@ const ScopeBlock = ({ label, type, children }: ScopeBlockProps) => {
 };
 
 const TicketCard = ({ task, savedLocations }: { task: TaskModel; savedLocations: SavedLocationIndex }) => {
-    const { updateTask, deleteTask } = useSync();
     const [isExpanded, setIsExpanded] = useState(false);
-    const [isDeleting, setIsDeleting] = useState(false);
-    
     const payload = task.payload || {};
     const isCompleted = payload.completed === true;
     const title = payload.title || translate('untitled');
@@ -305,15 +302,6 @@ const TicketCard = ({ task, savedLocations }: { task: TaskModel; savedLocations:
     const isInFocus = status === 'in_focus';
     const showExpanded = isExpanded || isInFocus;
     const theme = type === 'HABIT' ? THEMES.habit : type === 'EVENT' ? THEMES.event : THEMES.default;
-    
-    const onDragEnd = (_: any, info: any) => {
-        if (info.offset.x < -100) {
-            setIsDeleting(true);
-            setTimeout(() => deleteTask(task.id), 200);
-        } else if (info.offset.x > 100) {
-            updateTask(task.id, { ...payload, completed: !isCompleted });
-        }
-    };
     
     // Parse RRULE for display tags
     const scheduleTags = useMemo(() => {
@@ -339,9 +327,6 @@ const TicketCard = ({ task, savedLocations }: { task: TaskModel; savedLocations:
     const commuteDestinationText = commuteDestination?.display ?? payload.destination;
     const googleMapsUrl = type === 'COMMUTE'
       ? buildGoogleMapsUrl(commuteOrigin?.query ?? payload.origin, commuteDestination?.query ?? payload.destination)
-      : undefined;
-    const appleMapsUrl = type === 'COMMUTE'
-      ? buildAppleMapsUrl(commuteOrigin?.query ?? payload.origin, commuteDestination?.query ?? payload.destination)
       : undefined;
     const commuteEmbedUrl = type === 'COMMUTE'
       ? buildGoogleMapsEmbedUrl(commuteOrigin?.query ?? payload.origin, commuteDestination?.query ?? payload.destination)
@@ -399,31 +384,12 @@ const TicketCard = ({ task, savedLocations }: { task: TaskModel; savedLocations:
         <motion.div 
             layout
             initial={{ opacity: 0, y: 20 }}
-            animate={{ 
-                opacity: isDeleting ? 0 : 1, 
-                x: 0, 
-                scale: isDeleting ? 0.95 : 1 
-            }}
+          animate={{ opacity: 1, x: 0, scale: 1 }}
             exit={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.2 }}
             className="relative group mb-3"
         >
-            <div className="absolute inset-0 rounded-[1rem] flex items-center justify-between px-6 overflow-hidden">
-                <div className="flex items-center gap-2 text-emerald-500/30">
-                    <div className="w-1 h-3 bg-emerald-500/20" />
-              <span className="text-[10px] font-bold uppercase tracking-widest">{translate('swipeComplete')}</span>
-                </div>
-                <div className="flex items-center gap-2 text-red-500/30">
-              <span className="text-[10px] font-bold uppercase tracking-widest">{translate('swipeDelete')}</span>
-                    <Trash2 size={18} />
-                </div>
-            </div>
-            
             <motion.div
-                drag="x"
-                dragConstraints={{ left: -120, right: 120 }}
-                dragElastic={0.1}
-                onDragEnd={onDragEnd}
                 onClick={() => setIsExpanded(!isExpanded)}
                 className={cn(
                     "relative cursor-pointer transition-transform duration-500",
@@ -484,7 +450,7 @@ const TicketCard = ({ task, savedLocations }: { task: TaskModel; savedLocations:
                                   {type === 'EVENT' && <DetailGroup title={translate('detailEvent')} rows={eventRows} />}
                                   {type === 'EVENT' && <MapEmbed embedUrl={eventEmbedUrl} />}
                                   {type === 'COMMUTE' && <DetailGroup title={translate('detailCommute')} rows={commuteRows} />}
-                                  {type === 'COMMUTE' && <MapLinkRow googleUrl={googleMapsUrl} appleUrl={appleMapsUrl} />}
+                                  {type === 'COMMUTE' && <MapLinkRow googleUrl={googleMapsUrl} />}
                                   {type === 'COMMUTE' && <MapEmbed embedUrl={commuteEmbedUrl} />}
                                   {type === 'COMMUTE' && <CommuteSteps directions={payload.directions} />}
                                   {type === 'COUNTDOWN' && <DetailGroup title={translate('detailCountdown')} rows={countdownRows} />}
@@ -521,12 +487,22 @@ function App() {
     const [interactionState, setInteractionState] = useState<InteractionState>('IDLE');
     const [showSetup, setShowSetup] = useState(false);
     const [savedLocations, setSavedLocations] = useState<SavedLocationIndex>({});
+    const supportsDesktopWindowControls = useMemo(() => canUseDesktopWindowControls(), []);
 
     const inputRef = useRef<HTMLTextAreaElement>(null);
-    const tauriWindow = useRef(getCurrentWindow());
     const drawerRef = useRef<HTMLDivElement>(null);
 
-    const minimizeWindow = (e?: React.MouseEvent) => { if (e) e.stopPropagation(); tauriWindow.current.minimize().catch(err => console.error(err)); };
+    const minimizeWindow = (e?: React.MouseEvent) => {
+      if (e) e.stopPropagation();
+      minimizeDesktopWindow().catch(err => console.error(err));
+    };
+    const handleHeaderPointerDown = (e: React.PointerEvent<HTMLElement>) => {
+      if (!supportsDesktopWindowControls || e.button !== 0) {
+        return;
+      }
+
+      startDesktopWindowDrag().catch(console.error);
+    };
     useEffect(() => { 
       const loadSavedLocations = async () => {
         const settings = await invoke<any>('get_settings');
@@ -571,21 +547,19 @@ function App() {
             }
             await syncNow();
         } catch (invokeErr) {
-            console.warn("Local chat error, falling back to server:", invokeErr);
-            try {
-                const resp = await fetch('http://localhost:8000/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: message, userid: 1 }) });
-                if (resp.ok) { const data = await resp.json(); await syncNow(); if (data.response) { setChatHistory(prev => [...prev, { role: 'assistant', content: data.response }]); if (data.response.trim().endsWith('?')) { setInteractionState('AWAITING_REPLY'); } else { setInteractionState('SUCCESS'); setTimeout(() => setInteractionState('IDLE'), 2000); } } } else { setInteractionState('ERROR'); setTimeout(() => setInteractionState('IDLE'), 3000); }
-            } catch (err) { setInteractionState('ERROR'); setTimeout(() => setInteractionState('IDLE'), 3000); }
+            console.error("Local chat failed:", invokeErr);
+            setInteractionState('ERROR');
+            setTimeout(() => setInteractionState('IDLE'), 3000);
         } finally { setIsProcessing(false); if (inputRef.current) inputRef.current.focus(); }
     };
 
     return (
-        <main className="app-container w-screen h-screen flex flex-col relative bg-[#080808] rounded-[24px] overflow-hidden border border-white/15 shadow-2xl transition-all duration-300 ease-out">
+          <main className="app-container w-screen h-screen flex flex-col relative bg-[#080808] rounded-[24px] overflow-hidden border border-white/15 shadow-2xl transition-all duration-300 ease-out" style={{ minHeight: '100dvh' }}>
             <WebGLGrain colors={{ c1: [30, 30, 30], c2: [12, 12, 12], c3: [9, 9, 9], c4: [6, 6, 6] }} spreadX={0.35} spreadY={1.1} contrast={2.0} noiseFactor={0.7} opacity={1.0} />
             {showSetup && <SetupWizard onComplete={() => setShowSetup(false)} />}
-            <header onPointerDown={(e) => { if (e.button === 0) { tauriWindow.current.startDragging().catch(console.error); } }} className="user-header pt-[80px] pb-[16px] px-6 shrink-0 relative bg-transparent cursor-default select-none z-10">
-                <div className="absolute top-[22px] left-[22px] right-[22px] h-9 flex items-center justify-between pointer-events-none">
-                    <button onClick={minimizeWindow} className="w-9 h-9 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all pointer-events-auto bg-white/5 rounded-full hover:bg-white/10"><ChevronDown size={20} /></button>
+              <header onPointerDown={handleHeaderPointerDown} className="user-header pt-[80px] pb-[16px] px-6 shrink-0 relative bg-transparent cursor-default select-none z-10" style={{ paddingTop: 'calc(80px + env(safe-area-inset-top, 0px))' }}>
+                <div className="absolute top-[22px] left-[22px] right-[22px] h-9 flex items-center justify-between pointer-events-none" style={{ top: 'calc(22px + env(safe-area-inset-top, 0px))' }}>
+                {supportsDesktopWindowControls ? <button onClick={minimizeWindow} className="w-9 h-9 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all pointer-events-auto bg-white/5 rounded-full hover:bg-white/10"><ChevronDown size={20} /></button> : <div className="w-9 h-9" />}
                     <div className="flex items-center gap-3 pointer-events-auto h-full">
                         <button onClick={() => setIsSettingsOpen(true)} className="w-9 h-9 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all bg-white/5 rounded-full hover:bg-white/10"><SettingsIcon size={18} /></button>
                         <div className={cn("w-9 h-9 rounded-full flex items-center justify-center border transition-all duration-300 bg-white/5", isConnected ? "border-white/10 text-[var(--text-primary)]" : "border-white/5 text-[var(--text-secondary)] opacity-40 grayscale")}>{isConnected ? <Wifi size={18} strokeWidth={2} /> : <WifiOff size={18} strokeWidth={2} />}</div>
@@ -683,7 +657,7 @@ function App() {
                 <WebGLGrain colors={{ c1: [30, 30, 30], c2: [22, 22, 22], c3: [16, 16, 16], c4: [12, 12, 12] }} />
                 <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03] z-10" />
                 <div className="relative z-20">
-                    <form onSubmit={handleAction} className={cn("chat-input-wrapper flex items-end bg-transparent p-[20px_24px_28px] transition-all duration-400 relative overflow-hidden", isProcessing && "shadow-[inset_0_0_30px_rgba(99,102,241,0.1)]")}>
+                <form onSubmit={handleAction} className={cn("chat-input-wrapper flex items-end bg-transparent p-[20px_24px_28px] transition-all duration-400 relative overflow-hidden", isProcessing && "shadow-[inset_0_0_30px_rgba(99,102,241,0.1)]")} style={{ paddingBottom: 'calc(28px + env(safe-area-inset-bottom, 0px))' }}>
                         {isProcessing && (<div className="effect-container absolute inset-0 z-0 pointer-events-none overflow-hidden transition-opacity duration-500 opacity-100 scale-150"><div className="pearl-gradient pearl-slow" /><div className="pearl-gradient pearl-fast" /></div>)}
                         <textarea ref={inputRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAction(); } }} placeholder={interactionState === 'AWAITING_REPLY' ? t('placeholderReplyAgent') : placeholder} className={cn("flex-1 bg-transparent border-none text-[#d1d1d1] text-[14px] outline-none resize-none min-h-[40px] max-h-[120px] leading-[1.6] relative z-10 transition-colors", interactionState === 'AWAITING_REPLY' ? "text-white placeholder:text-white/30" : "placeholder:text-[#555]")} />
                         <button type="submit" disabled={isProcessing || !inputValue.trim()} className={cn("send-btn border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30", interactionState === 'AWAITING_REPLY' ? "bg-white text-black shadow-[0_0_15px_rgba(255,255,255,0.2)]" : "bg-white text-black")}><Send size={20} /></button>

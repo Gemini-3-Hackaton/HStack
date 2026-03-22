@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "npm run dev --prefix crates/hstack-app",
     "build": "npm run build --prefix crates/hstack-app",
-    "reset:welcome": "node scripts/reset-welcome-screen.mjs"
+    "reset:welcome": "node scripts/reset-welcome-screen.mjs",
+    "android:reinstall": "./scripts/android-reinstall-dev.sh"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.1.0"

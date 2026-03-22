@@ -141,6 +141,18 @@ npm run reset:welcome
 
 This helper derives the settings location from the Tauri app identifier and supports macOS and Linux without hardcoding a user-specific path.
 
+### Android Build Guide
+
+Android packaging now has a dedicated guide with the exact Tauri, SDK, JDK, signing, and adb steps used in this repository:
+
+- [docs/android-build.md](docs/android-build.md)
+
+For the normal Android developer loop, there is also a one-command reinstall script:
+
+```bash
+npm run android:reinstall
+```
+
 ### Security Configuration
 
 HStack stores your API keys in your system's **Hardware-Encrypted Keychain**. To configure:

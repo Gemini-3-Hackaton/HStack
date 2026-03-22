@@ -273,7 +273,13 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
           }}
         />
 
-        <div className="relative z-20 flex h-full flex-col px-4 pb-4 pt-3 sm:px-5">
+        <div
+          className="relative z-20 flex h-full flex-col px-4 pb-4 pt-3 sm:px-5"
+          style={{
+            paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
+            paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
+          }}
+        >
           <div className="shrink-0 border-b border-white/6 px-1 pb-4 pt-1">
             <div className="flex items-center justify-between">
               {selectedMode ? (
