@@ -127,6 +127,16 @@ npm run dev
 
 *Note: The first run will compile the Rust core and download necessary crates, which may take a few minutes. Subsequent runs are much faster.*
 
+**Reset the Welcome Screen During Development:**
+
+If you want to replay the onboarding or welcome flow, remove the app settings file with the helper script:
+
+```bash
+npm run reset:welcome
+```
+
+This helper derives the settings location from the Tauri app identifier and supports macOS and Linux without hardcoding a user-specific path.
+
 ### Security Configuration
 
 HStack stores your API keys in your system's **Hardware-Encrypted Keychain**. To configure:
@@ -212,3 +222,19 @@ HStack is building toward a world where your task board is a living, breathing s
 - **Voice-first interface** — talk to HStack while walking, driving, or cooking — no screen required
 
 The end state: a system that thinks about your day so you don't have to.
+
+---
+
+## License
+
+HStack uses a split-license model in this public repository:
+
+- The open product code is licensed under GPL-3.0-only.
+- `crates/hstack-core` is licensed under MPL-2.0.
+
+This matches the project architecture:
+
+- the public app and lite server remain strongly open when redistributed
+- the shared contract layer stays reusable across the public and private boundary without forcing the same copyleft scope
+
+See [docs/licensing.md](docs/licensing.md) and [docs/public-private-contract.md](docs/public-private-contract.md) for the rationale.
