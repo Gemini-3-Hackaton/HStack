@@ -63,31 +63,47 @@ fn parse_dtstart_value(value: &str) -> Result<DateTime<Utc>, String> {
 #[cfg(test)]
 mod tests {
     use super::parse_agent_rrule;
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, LocalResult, TimeZone, Utc};
+
+    fn must_parse_schedule(input: &str) -> (DateTime<Utc>, Option<String>) {
+        match parse_agent_rrule(input) {
+            Ok(parsed) => parsed,
+            Err(error) => panic!("schedule should parse in test: {error}"),
+        }
+    }
+
+    fn must_utc_datetime(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> DateTime<Utc> {
+        match Utc.with_ymd_and_hms(year, month, day, hour, minute, second) {
+            LocalResult::Single(value) => value,
+            other => panic!("expected unambiguous UTC datetime, got {other:?}"),
+        }
+    }
 
     #[test]
     fn parses_dtstart_only_as_one_time_schedule() {
-        let (start, rrule) = parse_agent_rrule("DTSTART:20260326T100000Z").expect("dtstart-only schedule should parse");
+        let (start, rrule) = must_parse_schedule("DTSTART:20260326T100000Z");
 
-        assert_eq!(start, Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap());
+        assert_eq!(start, must_utc_datetime(2026, 3, 26, 10, 0, 0));
         assert_eq!(rrule, None);
     }
 
     #[test]
     fn normalizes_missing_z_for_dtstart_only_schedule() {
-        let (start, rrule) = parse_agent_rrule("DTSTART:20260326T100000").expect("dtstart-only schedule without z should parse");
+        let (start, rrule) = must_parse_schedule("DTSTART:20260326T100000");
 
-        assert_eq!(start, Utc.with_ymd_and_hms(2026, 3, 26, 10, 0, 0).unwrap());
+        assert_eq!(start, must_utc_datetime(2026, 3, 26, 10, 0, 0));
         assert_eq!(rrule, None);
     }
 
     #[test]
     fn preserves_recurrence_when_rrule_is_present() {
-        let (start, rrule) = parse_agent_rrule("DTSTART:20260324T083000Z RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR")
-            .expect("recurring schedule should parse");
+        let (start, rrule) = must_parse_schedule("DTSTART:20260324T083000Z RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR");
 
-        assert_eq!(start, Utc.with_ymd_and_hms(2026, 3, 24, 8, 30, 0).unwrap());
-        let normalized = rrule.expect("rrule should be preserved for recurring schedules");
+        assert_eq!(start, must_utc_datetime(2026, 3, 24, 8, 30, 0));
+        let normalized = match rrule {
+            Some(value) => value,
+            None => panic!("rrule should be preserved for recurring schedules"),
+        };
         assert!(normalized.starts_with("DTSTART:20260324T083000Z\nRRULE:FREQ=WEEKLY"));
         assert!(normalized.contains("BYDAY=MO,WE,FR"));
     }

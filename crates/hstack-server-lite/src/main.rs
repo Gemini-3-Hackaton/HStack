@@ -1,6 +1,8 @@
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 // Minimal public server implementation.
 // Review docs/public-private-contract.md before adding backend complexity that belongs in the private server.
-use hstack_core::api_models::{UserCreate, UserLogin, AuthResponse, UserDTO, CreateTaskPayload};
+use hstack_core::api_models::{AuthResponse, CreateTicketPayload, UserCreate, UserDTO, UserLogin};
 use axum::{
     routing::{get, post},
     extract::{Query, State},
@@ -11,10 +13,15 @@ use serde::Deserialize;
 use sqlx::{SqlitePool, Row};
 use std::net::SocketAddr;
 use chrono::Utc;
+use serde::Serialize;
 use uuid::Uuid;
+use zxcvbn::{zxcvbn, Score};
+
+const MIN_PASSWORD_LENGTH: usize = 12;
+const MIN_PASSWORD_SCORE: Score = Score::Three;
 
 #[derive(serde::Serialize)]
-struct TaskDto {
+struct TicketDto {
     id: String,
     userid: i64,
     r#type: String,
@@ -24,7 +31,7 @@ struct TaskDto {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct TaskQuery {
+struct TicketQuery {
     userid: Option<i64>,
 }
 
@@ -50,41 +57,60 @@ fn ensure_password_present(password: &str) -> Result<(), StatusCode> {
     }
 }
 
+fn validate_new_password(password: &str, user_inputs: &[&str]) -> Result<(), StatusCode> {
+    let trimmed = password.trim();
+    if trimmed.len() < MIN_PASSWORD_LENGTH {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let estimate = zxcvbn(trimmed, user_inputs);
+    if estimate.score() < MIN_PASSWORD_SCORE {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    Ok(())
+}
+
+fn serialize_ticket_payload<T: Serialize>(payload: &T) -> Result<String, StatusCode> {
+    serde_json::to_string(payload).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
 #[tokio::main]
-async fn main() {
-    dotenvy::dotenv().ok();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:hstack_lite.db".to_string());
     
-    let pool = SqlitePool::connect(&db_url).await.expect("Failed to connect to SQLite");
+    let pool = SqlitePool::connect(&db_url).await?;
     
     // Minimal schema setup
     sqlx::query("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, first_name TEXT, email TEXT, password TEXT, created_at DATETIME)")
-        .execute(&pool).await.unwrap();
+        .execute(&pool).await?;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN email TEXT")
         .execute(&pool)
         .await;
-    sqlx::query("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, userid INTEGER, type TEXT, payload TEXT, status TEXT, created_at DATETIME)")
-        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TABLE IF NOT EXISTS tickets (id TEXT PRIMARY KEY, userid INTEGER, type TEXT, payload TEXT, status TEXT, created_at DATETIME)")
+        .execute(&pool).await?;
 
     let state = AppState { db: pool };
 
     let app = Router::new()
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
-        .route("/api/tasks", get(get_tasks).post(create_task))
+        .route("/api/tickets", get(get_tickets).post(create_ticket))
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 8001));
     println!("HStack Lite Server listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
 
 async fn register(State(state): State<AppState>, Json(payload): Json<UserCreate>) -> Result<Json<AuthResponse>, StatusCode> {
     let first_name = required_trimmed(&payload.first_name).ok_or(StatusCode::BAD_REQUEST)?;
     let email = required_trimmed(&payload.email).ok_or(StatusCode::BAD_REQUEST)?;
     let last_name = payload.last_name.unwrap_or_default().trim().to_string();
-    ensure_password_present(&payload.password)?;
+    validate_new_password(&payload.password, &[&first_name, &last_name, &email])?;
 
     let hashed = bcrypt::hash(&payload.password, bcrypt::DEFAULT_COST)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -140,45 +166,46 @@ async fn login(State(state): State<AppState>, Json(payload): Json<UserLogin>) ->
     }))
 }
 
-async fn get_tasks(
+async fn get_tickets(
     State(state): State<AppState>,
-    Query(query): Query<TaskQuery>,
-) -> Result<Json<Vec<TaskDto>>, StatusCode> {
+    Query(query): Query<TicketQuery>,
+) -> Result<Json<Vec<TicketDto>>, StatusCode> {
     let requested_user_id = query.userid.unwrap_or(1);
     let rows = sqlx::query(
-        "SELECT id, userid, type, payload, status, created_at FROM tasks WHERE userid = ? ORDER BY created_at ASC",
+        "SELECT id, userid, type, payload, status, created_at FROM tickets WHERE userid = ? ORDER BY created_at ASC",
     )
         .bind(requested_user_id)
         .fetch_all(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let mut tasks = Vec::new();
+    let mut tickets = Vec::new();
     for row in rows {
         let payload_str: String = row.get("payload");
-        tasks.push(TaskDto {
+        let payload = serde_json::from_str(&payload_str).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        tickets.push(TicketDto {
             id: row.get("id"),
             userid: row.get("userid"),
             r#type: row.get("type"),
-            payload: serde_json::from_str(&payload_str).unwrap_or(serde_json::json!({})),
+            payload,
             status: row.get("status"),
             created_at: row.get::<String, _>("created_at"),
         });
     }
     
-    Ok(Json(tasks))
+    Ok(Json(tickets))
 }
 
-async fn create_task(
+async fn create_ticket(
     State(state): State<AppState>,
-    Query(query): Query<TaskQuery>,
-    Json(payload): Json<CreateTaskPayload>,
+    Query(query): Query<TicketQuery>,
+    Json(payload): Json<CreateTicketPayload>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let id = Uuid::new_v4().to_string();
     let requested_user_id = query.userid.unwrap_or(1);
-    let payload_json = serde_json::to_string(&payload.payload).unwrap_or_default();
+    let payload_json = serialize_ticket_payload(&payload.payload)?;
     
-    sqlx::query("INSERT INTO tasks (id, userid, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO tickets (id, userid, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(&id)
         .bind(requested_user_id)
         .bind(&payload.r#type)
@@ -194,18 +221,34 @@ async fn create_task(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_password_present, required_trimmed};
+    use super::{ensure_password_present, required_trimmed, validate_new_password};
 
     #[test]
     fn test_bcrypt_logic() {
         let password = "password123";
-        let hashed = bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap();
-        assert!(bcrypt::verify(password, &hashed).unwrap());
+        let hashed = match bcrypt::hash(password, bcrypt::DEFAULT_COST) {
+            Ok(value) => value,
+            Err(error) => panic!("failed to hash password in test: {error}"),
+        };
+
+        let verified = match bcrypt::verify(password, &hashed) {
+            Ok(value) => value,
+            Err(error) => panic!("failed to verify password in test: {error}"),
+        };
+
+        assert!(verified);
     }
 
     #[test]
     fn rejects_blank_credentials() {
         assert_eq!(required_trimmed("  "), None);
         assert!(ensure_password_present(" ").is_err());
+    }
+
+    #[test]
+    fn rejects_weak_new_passwords() {
+        assert!(validate_new_password("short", &["antoine@example.com"]).is_err());
+        assert!(validate_new_password("Antoine1234!", &["Antoine", "antoine@example.com"]).is_err());
+        assert!(validate_new_password("correct horse battery staple 2049", &["antoine@example.com"]).is_ok());
     }
 }

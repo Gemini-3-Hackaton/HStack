@@ -1,0 +1,261 @@
+use chrono::Utc;
+use hstack_core::settings::{SavedProvider, SyncMode, UserSettings};
+use hstack_core::sync::{project_state, reconcile_state, SyncAction, SyncActionType};
+use hstack_core::ticket::{Ticket, TicketPayload, TicketStatus};
+use tauri::{AppHandle, Emitter};
+use tauri_plugin_store::StoreExt;
+use uuid::Uuid;
+
+use crate::location_utils::normalize_projected_tickets;
+use crate::secure_store::SecureStore;
+use crate::sync_runtime::SYNC_TICKETS_CHANGED_EVENT;
+
+const SYNC_TOKEN_KEY: &str = "hstack-sync-token";
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SyncSessionInfo {
+    pub(crate) user_id: Option<i64>,
+    pub(crate) user_name: Option<String>,
+    pub(crate) token: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_settings(app: AppHandle) -> Result<UserSettings, String> {
+    let store = match app.store("settings.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Settings store failure: {}", e)),
+    };
+
+    let settings_val = match store.get("user_settings") {
+        Some(val) => val,
+        None => serde_json::json!(UserSettings::default()),
+    };
+
+    match serde_json::from_value(settings_val) {
+        Ok(s) => Ok(s),
+        Err(e) => Err(format!("Settings parse failure: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn save_settings(app: AppHandle, settings: UserSettings) -> Result<(), String> {
+    let store = match app.store("settings.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Settings store failure: {}", e)),
+    };
+
+    store.set("user_settings", serde_json::json!(settings));
+    match store.save() {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Settings save failure: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn upsert_provider(
+    app: AppHandle,
+    provider: SavedProvider,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    if let Some(key) = api_key {
+        SecureStore::set_key(&app, &provider.id, &key)?;
+    }
+
+    let mut settings = get_settings(app.clone()).await?;
+
+    if let Some(pos) = settings.providers.iter().position(|p| p.id == provider.id) {
+        settings.providers[pos] = provider.clone();
+    } else {
+        settings.providers.push(provider.clone());
+    }
+
+    if settings.default_provider_id.is_none() {
+        settings.default_provider_id = Some(provider.id.clone());
+    }
+
+    save_settings(app, settings).await
+}
+
+#[tauri::command]
+pub async fn delete_provider(app: AppHandle, id: String) -> Result<(), String> {
+    let _ = SecureStore::delete_key(&app, &id);
+
+    let mut settings = get_settings(app.clone()).await?;
+    settings.providers.retain(|p| p.id != id);
+
+    if settings.default_provider_id.as_deref() == Some(&id) {
+        settings.default_provider_id = settings.providers.first().map(|p| p.id.clone());
+    }
+
+    save_settings(app, settings).await
+}
+
+pub(crate) async fn append_pending_action(
+    app: &AppHandle,
+    action_type: SyncActionType,
+    entity_id: String,
+    entity_type: String,
+    payload: Option<TicketPayload>,
+    status: Option<TicketStatus>,
+    notes: Option<String>,
+) -> Result<(), String> {
+    let store = match app.store("pending_actions.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("History store failure: {}", e)),
+    };
+
+    let mut actions: Vec<SyncAction> = match store.get("pending") {
+        Some(val) => serde_json::from_value(val).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    actions.push(SyncAction {
+        action_id: Uuid::new_v4().to_string(),
+        r#type: action_type,
+        entity_id,
+        entity_type,
+        status,
+        payload,
+        notes,
+        timestamp: Utc::now().to_rfc3339(),
+    });
+
+    if actions.len() > 50 {
+        actions.drain(0..actions.len() - 50);
+    }
+
+    store.set("pending", serde_json::json!(actions));
+    match store.save() {
+        Ok(_) => {
+            let _ = app.emit(SYNC_TICKETS_CHANGED_EVENT, serde_json::json!({}));
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to save pending action: {}", e)),
+    }
+}
+
+pub(crate) async fn load_tickets_state(app: AppHandle) -> Result<Vec<Ticket>, String> {
+    let base_store = match app.store("base_state.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Base state store failure: {}", e)),
+    };
+    let base_tickets: Vec<Ticket> = match base_store.get("tickets") {
+        Some(val) => serde_json::from_value(val).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let pending_store = match app.store("pending_actions.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Pending actions store failure: {}", e)),
+    };
+    let pending_actions: Vec<SyncAction> = match pending_store.get("pending") {
+        Some(val) => serde_json::from_value(val).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    Ok(normalize_projected_tickets(project_state(base_tickets, &pending_actions)))
+}
+
+#[tauri::command]
+pub async fn get_tickets(app: AppHandle) -> Result<Vec<Ticket>, String> {
+    load_tickets_state(app).await
+}
+
+pub(crate) async fn apply_sync_update_state(
+    app: AppHandle,
+    new_base_tickets: Vec<Ticket>,
+) -> Result<(), String> {
+    let base_store = match app.store("base_state.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Base state store failure: {}", e)),
+    };
+    base_store.set("tickets", serde_json::json!(new_base_tickets));
+    let _ = base_store.save();
+
+    let pending_store = match app.store("pending_actions.json") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Pending actions store failure: {}", e)),
+    };
+
+    let pending_actions: Vec<SyncAction> = match pending_store.get("pending") {
+        Some(val) => serde_json::from_value(val).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let remaining_actions = reconcile_state(&new_base_tickets, pending_actions);
+
+    pending_store.set("pending", serde_json::json!(remaining_actions));
+    match pending_store.save() {
+        Ok(_) => {
+            let _ = app.emit(SYNC_TICKETS_CHANGED_EVENT, serde_json::json!({}));
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to update pending actions after sync: {}", e)),
+    }
+}
+
+#[tauri::command]
+pub async fn apply_sync_update(app: AppHandle, new_base_tickets: Vec<Ticket>) -> Result<(), String> {
+    apply_sync_update_state(app, new_base_tickets).await
+}
+
+#[tauri::command]
+pub async fn get_user_locale(app: AppHandle) -> Result<(String, bool), String> {
+    let settings = get_settings(app).await?;
+    let locale = settings.locale.unwrap_or_else(|| "en-US".to_string());
+    let hour12 = settings.hour12.unwrap_or(true);
+    Ok((locale, hour12))
+}
+
+pub(crate) async fn load_sync_session(app: AppHandle) -> Result<SyncSessionInfo, String> {
+    let settings = get_settings(app.clone()).await?;
+    let token = SecureStore::get_key(&app, SYNC_TOKEN_KEY)?;
+
+    Ok(SyncSessionInfo {
+        user_id: settings.sync_user_id,
+        user_name: settings.sync_user_name,
+        token: if token.is_empty() { None } else { Some(token) },
+    })
+}
+
+#[tauri::command]
+pub async fn get_sync_session(app: AppHandle) -> Result<SyncSessionInfo, String> {
+    load_sync_session(app).await
+}
+
+#[tauri::command]
+pub async fn save_sync_session(
+    app: AppHandle,
+    user_id: i64,
+    user_name: String,
+    token: String,
+) -> Result<(), String> {
+    SecureStore::set_key(&app, SYNC_TOKEN_KEY, &token)?;
+
+    let mut settings = get_settings(app.clone()).await?;
+    settings.sync_user_id = Some(user_id);
+    settings.sync_user_name = Some(user_name);
+    save_settings(app, settings).await
+}
+
+#[tauri::command]
+pub async fn clear_sync_session(app: AppHandle) -> Result<(), String> {
+    let _ = SecureStore::delete_key(&app, SYNC_TOKEN_KEY);
+
+    let mut settings = get_settings(app.clone()).await?;
+    settings.sync_user_id = None;
+    settings.sync_user_name = None;
+    save_settings(app, settings).await
+}
+
+#[tauri::command]
+pub async fn complete_onboarding(app: AppHandle, mode: String) -> Result<(), String> {
+    let mut settings = get_settings(app.clone()).await?;
+    settings.onboarding_complete = true;
+    settings.sync_mode = match mode.as_str() {
+        "CloudOfficial" => SyncMode::CloudOfficial,
+        "CloudCustom" => SyncMode::CloudCustom,
+        _ => SyncMode::LocalOnly,
+    };
+    save_settings(app, settings).await
+}

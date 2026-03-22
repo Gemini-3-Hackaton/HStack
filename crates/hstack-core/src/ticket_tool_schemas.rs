@@ -70,12 +70,12 @@ pub fn tool_schemas() -> Vec<Tool> {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "task_id": {
+                        "ticket_id": {
                             "type": "string",
-                            "description": "The exact ID of the task/ticket to delete"
+                            "description": "The exact ID of the ticket to delete"
                         }
                     },
-                    "required": ["task_id"]
+                    "required": ["ticket_id"]
                 }),
             },
         },
@@ -98,7 +98,7 @@ pub fn tool_schemas() -> Vec<Tool> {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "task_id": {
+                        "ticket_id": {
                             "type": "string",
                             "description": "The ID of the ticket to edit"
                         },
@@ -163,7 +163,7 @@ pub fn tool_schemas() -> Vec<Tool> {
                             "description": "Optional: The new shared priority indicator."
                         }
                     },
-                    "required": ["task_id"]
+                    "required": ["ticket_id"]
                 }),
             },
         },
@@ -306,16 +306,16 @@ pub fn tool_schemas() -> Vec<Tool> {
             r#type: "function".to_string(),
             function: ToolFunction {
                 name: "remove_commute".to_string(),
-                description: "Remove/delete a registered commute by its task ID.".to_string(),
+                description: "Remove/delete a registered commute by its ticket ID.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "task_id": {
+                        "ticket_id": {
                             "type": "string",
-                            "description": "The ID of the commute task to remove"
+                            "description": "The ID of the commute ticket to remove"
                         }
                     },
-                    "required": ["task_id"]
+                    "required": ["ticket_id"]
                 }),
             },
         },

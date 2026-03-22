@@ -1,4 +1,4 @@
-import { type TaskModel } from "./SyncEngine";
+import { type TicketModel } from "./SyncEngine";
 import { getLocaleConfig, translate } from "./i18n";
 
 export interface SavedLocationRecord {
@@ -483,7 +483,7 @@ function getScheduleSortKey(payload: any): string {
   return payload?.scheduled_time || "";
 }
 
-function compareRelatedCommuteOrdering(left: TaskModel, right: TaskModel): number {
+function compareRelatedCommuteOrdering(left: TicketModel, right: TicketModel): number {
   const leftRelatedEventId = left.type === "COMMUTE" && typeof left.payload?.related_event_id === "string"
     ? left.payload.related_event_id
     : undefined;
@@ -496,7 +496,7 @@ function compareRelatedCommuteOrdering(left: TaskModel, right: TaskModel): numbe
   return 0;
 }
 
-export function compareScheduledTasks(left: TaskModel, right: TaskModel): number {
+export function compareScheduledTasks(left: TicketModel, right: TicketModel): number {
   const leftDate = getScheduleDate(left.payload);
   const rightDate = getScheduleDate(right.payload);
 
@@ -644,38 +644,38 @@ export function buildGoogleMapsEmbedUrl(origin?: string, destination?: string): 
   return undefined;
 }
 
-export function groupTasks(tasks: TaskModel[]) {
+export function groupTickets(tickets: TicketModel[]) {
   const grouped: {
-    inFocus: TaskModel | null;
-    days: Record<string, { sortDate: Date; tasks: TaskModel[] }>;
-    unplanned: TaskModel[];
+    inFocus: TicketModel | null;
+    days: Record<string, { sortDate: Date; tickets: TicketModel[] }>;
+    unplanned: TicketModel[];
   } = { inFocus: null, days: {}, unplanned: [] };
 
-  for (const task of tasks) {
-    if (task.status === "in_focus" && !grouped.inFocus) {
-      grouped.inFocus = task;
+  for (const ticket of tickets) {
+    if (ticket.status === "in_focus" && !grouped.inFocus) {
+      grouped.inFocus = ticket;
       break;
     }
   }
 
-  const regularTasks = tasks.filter((task) => task.status !== "in_focus");
+  const regularTickets = tickets.filter((ticket) => ticket.status !== "in_focus");
 
-  for (const task of regularTasks) {
-    const payload = task.payload || {};
+  for (const ticket of regularTickets) {
+    const payload = ticket.payload || {};
     const scheduledDate = getScheduleDate(payload);
 
     if (scheduledDate) {
       const dayLabel = getDayLabelFromDate(scheduledDate);
       if (!grouped.days[dayLabel]) {
-        grouped.days[dayLabel] = { sortDate: getStartOfDay(scheduledDate), tasks: [] };
+        grouped.days[dayLabel] = { sortDate: getStartOfDay(scheduledDate), tickets: [] };
       }
-      grouped.days[dayLabel].tasks.push(task);
+      grouped.days[dayLabel].tickets.push(ticket);
       continue;
     }
 
     const time = payload.scheduled_time?.trim();
     if (!time) {
-      grouped.unplanned.push(task);
+      grouped.unplanned.push(ticket);
       continue;
     }
 
@@ -698,17 +698,17 @@ export function groupTasks(tasks: TaskModel[]) {
     }
 
     if (!grouped.days[dayLabel]) {
-      grouped.days[dayLabel] = { sortDate: new Date(8640000000000000), tasks: [] };
+      grouped.days[dayLabel] = { sortDate: new Date(8640000000000000), tickets: [] };
     }
-    grouped.days[dayLabel].tasks.push(task);
+    grouped.days[dayLabel].tickets.push(ticket);
   }
 
-  const orderedDays: Record<string, TaskModel[]> = {};
+  const orderedDays: Record<string, TicketModel[]> = {};
   Object.entries(grouped.days)
     .sort(([, left], [, right]) => left.sortDate.getTime() - right.sortDate.getTime())
     .forEach(([label, entry]) => {
-      entry.tasks.sort(compareScheduledTasks);
-      orderedDays[label] = entry.tasks;
+      entry.tickets.sort(compareScheduledTasks);
+      orderedDays[label] = entry.tickets;
     });
 
   grouped.unplanned.sort((left, right) => {

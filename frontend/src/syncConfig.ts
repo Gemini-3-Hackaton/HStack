@@ -15,7 +15,6 @@ export interface SyncSessionInfo {
 
 export interface RemoteSyncConfig {
   baseUrl: string;
-  wsUrl: string;
   token: string;
   userId: number;
   userName: string | null;
@@ -51,15 +50,6 @@ export const resolveRemoteBaseUrl = (settings: UserSettingsShape) => {
   return null;
 };
 
-export const buildWsUrl = (baseUrl: string, userId: number) => {
-  const url = new URL(baseUrl);
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.pathname = `/ws/sync/${userId}`;
-  url.search = '';
-  url.hash = '';
-  return url.toString();
-};
-
 export const buildApiUrl = (baseUrl: string, path: string) => {
   const url = new URL(baseUrl);
   url.pathname = path;
@@ -80,7 +70,6 @@ export const resolveRemoteSyncConfig = (
 
   return {
     baseUrl,
-    wsUrl: buildWsUrl(baseUrl, session.user_id),
     token: session.token,
     userId: session.user_id,
     userName: session.user_name,

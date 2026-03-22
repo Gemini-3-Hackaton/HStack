@@ -75,7 +75,7 @@ pub struct TicketBindingDTO {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct CreateTaskPayload {
+pub struct CreateTicketPayload {
     pub r#type: String,
     pub status: String,
     pub payload: Option<TicketPayload>,

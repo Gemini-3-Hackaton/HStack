@@ -617,6 +617,8 @@ impl Ticket {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Map, Value};
+
     use super::{
         CommuteDepartureTime,
         decode_ticket_payload_for_type,
@@ -632,9 +634,37 @@ mod tests {
         TicketType,
     };
 
+    fn must_decode_payload(ticket_type: &TicketType, value: Value) -> TicketPayload {
+        match decode_ticket_payload_for_type(ticket_type, value) {
+            Ok(payload) => payload,
+            Err(error) => panic!("payload should decode in test: {error}"),
+        }
+    }
+
+    fn must_object(value: &Value) -> &Map<String, Value> {
+        match value.as_object() {
+            Some(object) => object,
+            None => panic!("updates should be an object"),
+        }
+    }
+
+    fn must_shared_schedule(payload: &TicketPayload) -> SharedTicketSchedule {
+        match payload.shared_schedule() {
+            Some(schedule) => schedule,
+            None => panic!("ticket should expose a shared schedule"),
+        }
+    }
+
+    fn must_deserialize_ticket(value: Value) -> Ticket {
+        match serde_json::from_value(value) {
+            Ok(ticket) => ticket,
+            Err(error) => panic!("ticket should deserialize in test: {error}"),
+        }
+    }
+
     #[test]
     fn decodes_event_payload_from_explicit_ticket_type() {
-        let payload = decode_ticket_payload_for_type(&TicketType::Event, serde_json::json!({
+        let payload = must_decode_payload(&TicketType::Event, serde_json::json!({
             "title": "Yoga",
             "duration_minutes": 60,
             "location": {
@@ -644,8 +674,7 @@ mod tests {
             },
             "status": "mandatory",
             "priority": "high"
-        }))
-        .expect("payload should decode");
+        }));
 
         match payload {
             TicketPayload::Event { title, duration_minutes, scheduled_time_iso, rrule, location, status, priority, completed } => {
@@ -667,12 +696,11 @@ mod tests {
 
     #[test]
     fn decodes_countdown_payload_from_explicit_ticket_type() {
-        let payload = decode_ticket_payload_for_type(&TicketType::Countdown, serde_json::json!({
+        let payload = must_decode_payload(&TicketType::Countdown, serde_json::json!({
             "title": "Refactor auth",
             "duration_minutes": 45,
             "expires_at": "2026-03-20T22:00:00+00:00"
-        }))
-        .expect("countdown payload should decode");
+        }));
 
         match payload {
             TicketPayload::Countdown {
@@ -707,7 +735,7 @@ mod tests {
             "priority": "urgent"
         });
 
-        payload.apply_partial_update(updates.as_object().expect("updates should be an object"));
+        payload.apply_partial_update(must_object(&updates));
 
         match payload {
             TicketPayload::Task { status, priority, .. } => {
@@ -720,7 +748,7 @@ mod tests {
 
     #[test]
     fn decodes_commute_locations_when_present() {
-        let payload = decode_ticket_payload_for_type(&TicketType::Commute, serde_json::json!({
+        let payload = must_decode_payload(&TicketType::Commute, serde_json::json!({
             "title": "Trip to office",
             "origin": "Current location",
             "origin_location": {
@@ -733,8 +761,7 @@ mod tests {
                 "address": "1 Infinite Loop, Cupertino",
                 "label": "Office"
             }
-        }))
-        .expect("commute payload should decode");
+        }));
 
         match payload {
             TicketPayload::Commute { origin_location, destination_location, .. } => {
@@ -752,15 +779,14 @@ mod tests {
 
     #[test]
     fn decodes_saved_location_references() {
-        let payload = decode_ticket_payload_for_type(&TicketType::Event, serde_json::json!({
+        let payload = must_decode_payload(&TicketType::Event, serde_json::json!({
             "title": "Dinner",
             "location": {
                 "location_type": "saved_location",
                 "location_id": "loc-home",
                 "label": "Home"
             }
-        }))
-        .expect("event payload should decode saved locations");
+        }));
 
         match payload {
             TicketPayload::Event { location, .. } => {
@@ -775,7 +801,7 @@ mod tests {
 
     #[test]
     fn decodes_commute_departure_time() {
-        let payload = decode_ticket_payload_for_type(&TicketType::Commute, serde_json::json!({
+        let payload = must_decode_payload(&TicketType::Commute, serde_json::json!({
             "title": "Trip to office",
             "origin": "Home",
             "destination": "Office",
@@ -784,8 +810,7 @@ mod tests {
                 "buffer_minutes": 12
             },
             "scheduled_time_iso": "2026-03-25T09:00:00+00:00"
-        }))
-        .expect("commute payload should decode departure semantics");
+        }));
 
         match payload {
             TicketPayload::Commute { departure_time, scheduled_time_iso, .. } => {
@@ -810,7 +835,7 @@ mod tests {
             completed: Some(false),
         };
 
-        let schedule = payload.shared_schedule().expect("task should expose a shared schedule");
+        let schedule = must_shared_schedule(&payload);
 
         assert!(schedule.is_scheduled());
         assert_eq!(schedule.scheduled_time_iso.as_deref(), Some("2026-03-25T09:00:00+00:00"));
@@ -855,12 +880,11 @@ mod tests {
 
     #[test]
     fn decodes_habit_status_and_priority_when_present() {
-        let payload = decode_ticket_payload_for_type(&TicketType::Habit, serde_json::json!({
+        let payload = must_decode_payload(&TicketType::Habit, serde_json::json!({
             "title": "Morning reading",
             "status": "active",
             "priority": "medium"
-        }))
-        .expect("habit payload should decode");
+        }));
 
         match payload {
             TicketPayload::Habit { status, priority, .. } => {
@@ -873,7 +897,7 @@ mod tests {
 
     #[test]
     fn deserializes_ticket_using_its_type_discriminator() {
-        let ticket: Ticket = serde_json::from_value(serde_json::json!({
+        let ticket: Ticket = must_deserialize_ticket(serde_json::json!({
             "id": "ticket-1",
             "type": "EVENT",
             "status": "idle",
@@ -894,8 +918,7 @@ mod tests {
             "created_at": "2026-03-20T22:00:00+00:00",
             "updated_at": "2026-03-20T22:00:00+00:00",
             "title": "Yoga"
-        }))
-        .expect("ticket should deserialize");
+        }));
 
         assert_eq!(ticket.r#type, TicketType::Event);
         assert_eq!(ticket.status, TicketStatus::Idle);

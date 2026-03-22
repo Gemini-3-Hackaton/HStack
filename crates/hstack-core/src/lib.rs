@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 // Shared contract surface for public and private HStack components.
 // Review docs/public-private-contract.md before expanding shared models or APIs.
 pub mod provider;

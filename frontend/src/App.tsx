@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { SyncProvider, TaskModel } from "./SyncEngine";
+import { SyncProvider, TicketModel } from "./SyncEngine";
 import { useSync } from "./useSync";
 import { Send, ChevronDown, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -22,9 +22,9 @@ import {
   getDisplayScheduleDate,
   getScheduleTags,
   getSharedSchedule,
-  groupTasks,
+  groupTickets,
   resolveStructuredLocation,
-} from "./taskPresentation";
+} from "./ticketPresentation";
 import { canUseDesktopWindowControls, minimizeDesktopWindow, startDesktopWindowDrag } from "./platform";
 
 const TASK_TYPE_LABELS = {
@@ -291,14 +291,14 @@ const ScopeBlock = ({ label, type, children }: ScopeBlockProps) => {
     return (<div className="flex flex-col mb-4"><div className="pl-[2.5px] mb-1 flex items-center h-4"><span className={cn("text-[10px] font-bold uppercase tracking-[1.5px] whitespace-nowrap", isWeek ? "text-[#3B82F6]" : "text-white/30")}>{label}</span></div><div className="flex gap-2"><div className="shrink-0 pl-[4px]"><div className={cn("w-[1.5px] h-full transition-all duration-300", isWeek ? "bg-[#3B82F6]" : "bg-white/10")} /></div><div className="flex-1 flex flex-col gap-4">{children}</div></div></div>);
 };
 
-const TicketCard = ({ task, savedLocations }: { task: TaskModel; savedLocations: SavedLocationIndex }) => {
+const TicketCard = ({ ticket, savedLocations }: { ticket: TicketModel; savedLocations: SavedLocationIndex }) => {
     const [isExpanded, setIsExpanded] = useState(false);
-    const payload = task.payload || {};
+  const payload = ticket.payload || {};
     const isCompleted = payload.completed === true;
     const title = payload.title || translate('untitled');
-    const type = task.type || 'TASK';
-    const status = task.status || 'idle';
-    const notes = task.notes || payload.notes || payload.note;
+  const type = ticket.type || 'TASK';
+  const status = ticket.status || 'idle';
+  const notes = ticket.notes || payload.notes || payload.note;
     const isInFocus = status === 'in_focus';
     const showExpanded = isExpanded || isInFocus;
     const theme = type === 'HABIT' ? THEMES.habit : type === 'EVENT' ? THEMES.event : THEMES.default;
@@ -475,7 +475,7 @@ const TicketCard = ({ task, savedLocations }: { task: TaskModel; savedLocations:
 
 // --- Main App Component ---
 function App() {
-    const { tasks, syncNow, isConnected } = useSync();
+  const { tickets, syncNow, isConnected } = useSync();
   const { t } = useI18n();
     const [inputValue, setInputValue] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
@@ -574,10 +574,10 @@ function App() {
             </header>
 
             <section className="stack-container flex-1 overflow-y-auto no-scrollbar pb-4 flex flex-col relative z-10">
-                <div className="px-6 pt-4 flex flex-col"><div className="scope-root flex flex-col pt-2">{tasks.length === 0 ? (<div className="text-[var(--text-secondary)] text-center py-5 text-[13px]">{t('emptyStack')}</div>) : (
+                <div className="px-6 pt-4 flex flex-col"><div className="scope-root flex flex-col pt-2">{tickets.length === 0 ? (<div className="text-[var(--text-secondary)] text-center py-5 text-[13px]">{t('emptyStack')}</div>) : (
                     (() => {
-                    const grouped = groupTasks(tasks); const dayKeys = Object.keys(grouped.days);
-                    return (<>{grouped.inFocus && (<div className="mb-8"><div className="pl-[2.5px] mb-2 flex items-center h-4"><span className="text-[10px] font-bold uppercase tracking-[1.5px] text-[#3B82F6]">{t('nowInFocus')}</span></div><TicketCard task={grouped.inFocus} savedLocations={savedLocations} /></div>)}{grouped.unplanned.length > 0 && (<div className={cn("task-list flex flex-col gap-4 px-4 pb-8", dayKeys.length > 0 && "opacity-60 grayscale-[0.5]")}>{grouped.unplanned.map(task => <TicketCard key={task.id} task={task} savedLocations={savedLocations} />)}</div>)}{dayKeys.length > 0 && (<ScopeBlock label={t('timeline')} type="week">{dayKeys.map(dayLabel => (<ScopeBlock key={dayLabel} label={dayLabel} type="day"><div className="task-list flex flex-col gap-4">{grouped.days[dayLabel].map(task => <TicketCard key={task.id} task={task} savedLocations={savedLocations} />)}</div></ScopeBlock>))}</ScopeBlock>)}</>);
+                  const grouped = groupTickets(tickets); const dayKeys = Object.keys(grouped.days);
+                  return (<>{grouped.inFocus && (<div className="mb-8"><div className="pl-[2.5px] mb-2 flex items-center h-4"><span className="text-[10px] font-bold uppercase tracking-[1.5px] text-[#3B82F6]">{t('nowInFocus')}</span></div><TicketCard ticket={grouped.inFocus} savedLocations={savedLocations} /></div>)}{grouped.unplanned.length > 0 && (<div className={cn("task-list flex flex-col gap-4 px-4 pb-8", dayKeys.length > 0 && "opacity-60 grayscale-[0.5]")}>{grouped.unplanned.map(ticket => <TicketCard key={ticket.id} ticket={ticket} savedLocations={savedLocations} />)}</div>)}{dayKeys.length > 0 && (<ScopeBlock label={t('timeline')} type="week">{dayKeys.map(dayLabel => (<ScopeBlock key={dayLabel} label={dayLabel} type="day"><div className="task-list flex flex-col gap-4">{grouped.days[dayLabel].map(ticket => <TicketCard key={ticket.id} ticket={ticket} savedLocations={savedLocations} />)}</div></ScopeBlock>))}</ScopeBlock>)}</>);
                     })()
                 )}</div></div>
                 <div className="h-[20px] shrink-0" />

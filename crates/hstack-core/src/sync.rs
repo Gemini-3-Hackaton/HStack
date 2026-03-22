@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_deserialized_create_and_update_actions_preserve_scheduled_event_fields() {
-        let create_action: SyncAction = serde_json::from_value(serde_json::json!({
+        let create_action: SyncAction = match serde_json::from_value(serde_json::json!({
             "action_id": "create-yoga",
             "type": "CREATE",
             "entity_id": "yoga-1",
@@ -411,10 +411,12 @@ mod tests {
             },
             "status": "idle",
             "timestamp": "2026-03-20T22:26:42.489738+00:00"
-        }))
-        .expect("create action should deserialize");
+        })) {
+            Ok(action) => action,
+            Err(error) => panic!("create action should deserialize: {error}"),
+        };
 
-        let update_action: SyncAction = serde_json::from_value(serde_json::json!({
+        let update_action: SyncAction = match serde_json::from_value(serde_json::json!({
             "action_id": "update-yoga",
             "type": "UPDATE",
             "entity_id": "yoga-1",
@@ -424,8 +426,10 @@ mod tests {
                 "scheduled_time_iso": "2026-03-26T09:00:00+00:00"
             },
             "timestamp": "2026-03-20T22:31:07.811231+00:00"
-        }))
-        .expect("update action should deserialize");
+        })) {
+            Ok(action) => action,
+            Err(error) => panic!("update action should deserialize: {error}"),
+        };
 
         let projected = project_state(vec![], &[create_action, update_action]);
         assert_eq!(projected.len(), 1);

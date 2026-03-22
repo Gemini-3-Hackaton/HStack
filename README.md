@@ -170,8 +170,8 @@ The public repo currently ships a lightweight auth/tasks server in `crates/hstac
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/tasks?userid=N` | Fetch structured task objects for a user from the lite server |
-| `POST` | `/api/tasks?userid=N` | Create a task for a user in the lite server |
+| `GET` | `/api/tickets?userid=N` | Fetch structured ticket objects for a user from the lite server |
+| `POST` | `/api/tickets?userid=N` | Create a ticket for a user in the lite server |
 | `POST` | `/api/auth/register` | Create a new user account |
 | `POST` | `/api/auth/login` | Authenticate an existing user |
 

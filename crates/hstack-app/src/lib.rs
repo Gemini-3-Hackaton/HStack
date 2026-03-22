@@ -1,395 +1,64 @@
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 // Public client entrypoint.
 // Review docs/public-private-contract.md before coupling client behavior to private-only backend capabilities.
+mod app_state;
+mod location_utils;
+mod planner_support;
 mod secure_store;
+mod sync_runtime;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
-use serde_json::{json, Value};
+use serde_json::Value;
 use hstack_core::error::Error as CoreError;
 use hstack_core::provider::gemini::generate_gemini_content;
 use hstack_core::provider::openai_compat::generate_openai_content;
 use hstack_core::provider::{Message, Role, ProviderConfig, Tool, ToolCall, ToolFunctionCall};
 use hstack_core::chat::{chat_loop, ToolExecutor, ContextRefreshFn};
-use hstack_core::settings::{SavedLocation, SavedProvider, SyncMode, UserSettings};
 use hstack_core::ticket::{
     CommuteDepartureTime,
     tool_schemas,
     EventAttendanceStatus,
     HabitWorkflowStatus,
     TaskWorkflowStatus,
-    TicketLocation,
-    Ticket,
     TicketPayload,
     TicketPriority,
     TicketStatus,
 };
-use hstack_core::sync::{SyncAction, SyncActionType, project_state, reconcile_state};
+use hstack_core::sync::{SyncAction, SyncActionType};
 use hstack_core::temporal_parser::parse_agent_rrule;
 use secure_store::SecureStore;
+use sync_runtime::NativeSyncRuntimeState;
 use uuid::Uuid;
 use chrono::{Utc, Local, Datelike};
-use std::collections::{HashMap, HashSet};
-
-const SYNC_TOKEN_KEY: &str = "hstack-sync-token";
-const DEFAULT_COMMUTE_BUFFER_MINUTES: i64 = 10;
-
-#[derive(serde::Serialize)]
-struct SyncSessionInfo {
-    user_id: Option<i64>,
-    user_name: Option<String>,
-    token: Option<String>,
-}
-
-fn parse_optional_deserialized_arg<T>(args: &Value, key: &str, label: &str) -> Result<Option<T>, String>
-where
-    T: for<'de> serde::Deserialize<'de>,
-{
-    match args.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => serde_json::from_value(value.clone())
-            .map(Some)
-            .map_err(|_| format!("invalid {} value", label)),
-    }
-}
-
-fn parse_location_arg(args: &Value, key: &str, label: &str) -> Result<Option<TicketLocation>, String> {
-    parse_optional_deserialized_arg::<TicketLocation>(args, key, label)
-}
-
-fn parse_departure_time_arg(args: &Value, key: &str, label: &str) -> Result<Option<CommuteDepartureTime>, String> {
-    parse_optional_deserialized_arg::<CommuteDepartureTime>(args, key, label)
-}
-
-fn normalize_address_text_location(text: &str, label: &str) -> Result<TicketLocation, String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{} must not be empty", label));
-    }
-
-    Ok(TicketLocation::AddressText {
-        address: trimmed.to_string(),
-        label: None,
-    })
-}
-
-fn location_display_text(location: &TicketLocation) -> String {
-    match location {
-        TicketLocation::SavedLocation {
-            location_id,
-            label,
-        } => label.clone().unwrap_or_else(|| location_id.clone()),
-        TicketLocation::Coordinates {
-            latitude,
-            longitude,
-            label,
-        } => label.clone().unwrap_or_else(|| format!("{}, {}", latitude, longitude)),
-        TicketLocation::AddressText { address, .. } => address.clone(),
-        TicketLocation::PlaceId { label, place_id, .. } => label.clone().unwrap_or_else(|| place_id.clone()),
-        TicketLocation::CurrentPosition { label } => label.clone().unwrap_or_else(|| "Current position".to_string()),
-    }
-}
-
-fn normalize_location_key(text: &str) -> String {
-    text.trim().to_lowercase()
-}
-
-fn find_saved_location_by_id<'a>(settings: &'a UserSettings, location_id: &str) -> Option<&'a SavedLocation> {
-    settings.saved_locations.iter().find(|location| location.id == location_id)
-}
-
-fn find_saved_location_by_label<'a>(settings: &'a UserSettings, label: &str) -> Option<&'a SavedLocation> {
-    let normalized = normalize_location_key(label);
-    settings
-        .saved_locations
-        .iter()
-        .find(|location| normalize_location_key(&location.label) == normalized)
-}
-
-fn is_ambiguous_location_text(text: &str) -> bool {
-    matches!(
-        normalize_location_key(text).as_str(),
-        "home"
-            | "my home"
-            | "house"
-            | "my house"
-            | "my place"
-            | "place"
-            | "work"
-            | "office"
-            | "my office"
-            | "gym"
-            | "school"
-            | "there"
-            | "here"
-    )
-}
-
-fn resolve_saved_location_reference(
-    settings: &UserSettings,
-    location_id: &str,
-    label: Option<String>,
-    field_label: &str,
-) -> Result<(String, TicketLocation), String> {
-    let saved_location = find_saved_location_by_id(settings, location_id)
-        .ok_or_else(|| format!("unknown {} location_id '{}'", field_label, location_id))?;
-
-    let resolved = match &saved_location.location {
-        TicketLocation::SavedLocation { .. } => {
-            return Err(format!("saved location '{}' must resolve to a concrete location", saved_location.label));
-        }
-        concrete => location_display_text(concrete),
-    };
-
-    Ok((
-        resolved,
-        TicketLocation::SavedLocation {
-            location_id: location_id.to_string(),
-            label: label.or_else(|| Some(saved_location.label.clone())),
-        },
-    ))
-}
-
-fn resolve_location_object(
-    location: TicketLocation,
-    settings: &UserSettings,
-    field_label: &str,
-) -> Result<(String, TicketLocation), String> {
-    match location {
-        TicketLocation::SavedLocation { location_id, label } => {
-            resolve_saved_location_reference(settings, &location_id, label, field_label)
-        }
-        other => {
-            let rendered = location_display_text(&other);
-            if rendered.trim().is_empty() {
-                return Err(format!("{} structured location must render to a non-empty value", field_label));
-            }
-
-            Ok((rendered, other))
-        }
-    }
-}
-
-fn format_saved_locations_for_prompt(saved_locations: &[SavedLocation]) -> String {
-    if saved_locations.is_empty() {
-        return "- None".to_string();
-    }
-
-    saved_locations
-        .iter()
-        .map(|saved_location| {
-            let rendered = match &saved_location.location {
-                TicketLocation::SavedLocation { location_id, .. } => location_id.clone(),
-                concrete => location_display_text(concrete),
-            };
-
-            format!("- {} | {} | {}", saved_location.id, saved_location.label, rendered)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn resolve_event_location(args: &Value, settings: &UserSettings) -> Result<Option<TicketLocation>, String> {
-    match parse_location_arg(args, "location", "event location")? {
-        None => Ok(None),
-        Some(location) => resolve_location_object(location, settings, "event location").map(|(_, location)| Some(location)),
-    }
-}
-
-fn resolve_commute_location(
-    args: &Value,
-    object_key: &str,
-    text_key: &str,
-    label: &str,
-    settings: &UserSettings,
-) -> Result<(String, TicketLocation), String> {
-    let text_value = args.get(text_key).and_then(Value::as_str).map(str::trim);
-    let object_value = parse_location_arg(args, object_key, label)?;
-
-    match (text_value, object_value) {
-        (Some(text), Some(location)) => {
-            if text.is_empty() {
-                return Err(format!("{} text must not be empty", label));
-            }
-
-            let (rendered, normalized) = resolve_location_object(location, settings, label)?;
-            let text_matches_saved_label = matches!(
-                &normalized,
-                TicketLocation::SavedLocation {
-                    label: Some(saved_label),
-                    ..
-                } if saved_label == text
-            );
-
-            if rendered != text && !text_matches_saved_label {
-                return Err(format!(
-                    "{} text '{}' does not match structured location '{}'",
-                    label,
-                    text,
-                    rendered
-                ));
-            }
-
-            Ok((rendered, normalized))
-        }
-        (Some(text), None) => {
-            if find_saved_location_by_label(settings, text).is_some() {
-                return Err(format!(
-                    "{} '{}' matches a saved location; use location_id instead of raw text",
-                    label,
-                    text
-                ));
-            }
-
-            if is_ambiguous_location_text(text) {
-                return Err(format!(
-                    "{} '{}' is ambiguous; ask the user which saved place or concrete address they mean",
-                    label,
-                    text
-                ));
-            }
-
-            let location = normalize_address_text_location(text, label)?;
-            Ok((text.to_string(), location))
-        }
-        (None, Some(location)) => resolve_location_object(location, settings, label),
-        (None, None) => Err(format!("missing {}", label)),
-    }
-}
-
-fn extract_rrule_days(rrule: &str) -> Option<String> {
-    let rule_line = rrule.lines().find(|line| line.starts_with("RRULE:"))?;
-    let byday = rule_line
-        .trim_start_matches("RRULE:")
-        .split(';')
-        .find_map(|segment| segment.strip_prefix("BYDAY="))?;
-
-    let normalized = byday
-        .split(',')
-        .filter_map(|token| match token {
-            "MO" => Some("monday"),
-            "TU" => Some("tuesday"),
-            "WE" => Some("wednesday"),
-            "TH" => Some("thursday"),
-            "FR" => Some("friday"),
-            "SA" => Some("saturday"),
-            "SU" => Some("sunday"),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized.join(","))
-    }
-}
-
-fn deadline_from_scheduled_time(scheduled_time_iso: &str) -> Option<String> {
-    chrono::DateTime::parse_from_rfc3339(scheduled_time_iso)
-        .ok()
-        .map(|value| value.with_timezone(&Local).format("%H:%M").to_string())
-}
-
-fn infer_commute_payload_from_event(event_id: &str, payload: &TicketPayload) -> Option<TicketPayload> {
-    let TicketPayload::Event {
-        title,
-        scheduled_time_iso,
-        rrule,
-        location,
-        ..
-    } = payload else {
-        return None;
-    };
-
-    if scheduled_time_iso.is_none() && rrule.is_none() {
-        return None;
-    }
-
-    let destination_location = location.clone()?;
-    if matches!(destination_location, TicketLocation::CurrentPosition { .. }) {
-        return None;
-    }
-
-    let destination = location_display_text(&destination_location);
-    if destination.trim().is_empty() {
-        return None;
-    }
-
-    Some(TicketPayload::Commute {
-        title: format!("Commute to {}", title),
-        label: Some("event_commute".to_string()),
-        origin: "Current position".to_string(),
-        origin_location: Some(TicketLocation::CurrentPosition {
-            label: Some("Current position".to_string()),
-        }),
-        destination,
-        destination_location: Some(destination_location),
-        departure_time: Some(CommuteDepartureTime::RelativeToArrival {
-            buffer_minutes: DEFAULT_COMMUTE_BUFFER_MINUTES,
-        }),
-        scheduled_time_iso: scheduled_time_iso.clone(),
-        rrule: rrule.clone(),
-        deadline: scheduled_time_iso
-            .as_deref()
-            .and_then(deadline_from_scheduled_time),
-        days: rrule.as_deref().and_then(extract_rrule_days),
-        related_event_id: Some(event_id.to_string()),
-        live: None,
-        minutes_remaining: None,
-        directions: None,
-        priority: None,
-        completed: Some(false),
-    })
-}
-
-fn normalize_legacy_commute_payload(payload: &mut TicketPayload) {
-    let TicketPayload::Commute {
-        departure_time,
-        scheduled_time_iso,
-        rrule,
-        ..
-    } = payload else {
-        return;
-    };
-
-    if departure_time.is_some() {
-        return;
-    }
-
-    if scheduled_time_iso.is_none() && rrule.is_none() {
-        return;
-    }
-
-    *departure_time = Some(CommuteDepartureTime::RelativeToArrival {
-        buffer_minutes: DEFAULT_COMMUTE_BUFFER_MINUTES,
-    });
-}
-
-fn normalize_projected_tasks(mut tasks: Vec<Ticket>) -> Vec<Ticket> {
-    for ticket in &mut tasks {
-        normalize_legacy_commute_payload(&mut ticket.payload);
-    }
-
-    tasks
-}
-
-fn find_related_commute_id(tasks: &[Ticket], event_id: &str) -> Option<String> {
-    tasks.iter().find_map(|ticket| match &ticket.payload {
-        TicketPayload::Commute {
-            related_event_id: Some(related_event_id),
-            ..
-        } if related_event_id == event_id => Some(ticket.id.clone()),
-        _ => None,
-    })
-}
+use crate::app_state::{get_settings, get_tickets};
+pub(crate) use app_state::{append_pending_action, apply_sync_update_state, load_sync_session, load_tickets_state, SyncSessionInfo};
+pub(crate) use location_utils::{
+    DEFAULT_COMMUTE_BUFFER_MINUTES,
+    find_related_commute_id,
+    format_saved_locations_for_prompt,
+    infer_commute_payload_from_event,
+    parse_departure_time_arg,
+    parse_optional_deserialized_arg,
+    resolve_commute_location,
+    resolve_event_location,
+};
+pub(crate) use planner_support::{
+    build_planner_execution_note,
+    extract_first_json_value,
+    PlannerAction,
+    PlannerPlan,
+    validate_plan,
+};
 
 async fn sync_inferred_event_commute(
     app: &AppHandle,
     event_id: &str,
     event_payload: Option<&TicketPayload>,
 ) -> Result<(), String> {
-    let tasks = get_tasks(app.clone()).await.unwrap_or_default();
-    let existing_commute_id = find_related_commute_id(&tasks, event_id);
+    let tickets = get_tickets(app.clone()).await.unwrap_or_default();
+    let existing_commute_id = find_related_commute_id(&tickets, event_id);
     let inferred_payload = event_payload.and_then(|payload| infer_commute_payload_from_event(event_id, payload));
 
     match (existing_commute_id, inferred_payload) {
@@ -424,147 +93,11 @@ async fn sync_inferred_event_commute(
     }
 }
 
-#[tauri::command]
-async fn get_settings(app: AppHandle) -> Result<UserSettings, String> {
-    let store = match app.store("settings.json") {
-        Ok(s) => s,
-        Err(e) => return Err(format!("Settings store failure: {}", e)),
-    };
-
-    let settings_val = match store.get("user_settings") {
-        Some(val) => val,
-        None => json!(UserSettings::default()),
-    };
-
-    match serde_json::from_value(settings_val) {
-        Ok(s) => Ok(s),
-        Err(e) => Err(format!("Settings parse failure: {}", e)),
-    }
-}
-
-#[tauri::command]
-async fn save_settings(app: AppHandle, settings: UserSettings) -> Result<(), String> {
-    let store = match app.store("settings.json") {
-        Ok(s) => s,
-        Err(e) => return Err(format!("Settings store failure: {}", e)),
-    };
-
-    store.set("user_settings", json!(settings));
-    match store.save() {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("Settings save failure: {}", e)),
-    }
-}
-
-#[tauri::command]
-async fn upsert_provider(app: AppHandle, provider: SavedProvider, api_key: Option<String>) -> Result<(), String> {
-    // 1. If API key is provided, save it to the app's secure store (Keychain/Keystore)
-    if let Some(key) = api_key {
-        SecureStore::set_key(&app, &provider.id, &key)?;
-    }
-
-    // 2. Update settings.json
-    let mut settings = get_settings(app.clone()).await?;
-    
-    if let Some(pos) = settings.providers.iter().position(|p| p.id == provider.id) {
-        settings.providers[pos] = provider.clone();
-    } else {
-        settings.providers.push(provider.clone());
-    }
-
-    if settings.default_provider_id.is_none() {
-        settings.default_provider_id = Some(provider.id.clone());
-    }
-
-    save_settings(app, settings).await
-}
-
-#[tauri::command]
-async fn delete_provider(app: AppHandle, id: String) -> Result<(), String> {
-    // 1. Delete from secure store
-    let _ = SecureStore::delete_key(&app, &id);
-
-    // 2. Update settings.json
-    let mut settings = get_settings(app.clone()).await?;
-    settings.providers.retain(|p| p.id != id);
-    
-    if settings.default_provider_id.as_deref() == Some(&id) {
-        settings.default_provider_id = settings.providers.first().map(|p| p.id.clone());
-    }
-
-    save_settings(app, settings).await
-}
-
-async fn append_pending_action(
-    app: &AppHandle,
-    action_type: SyncActionType,
-    entity_id: String,
-    entity_type: String,
-    payload: Option<TicketPayload>,
-    status: Option<TicketStatus>,
-    notes: Option<String>,
-) -> Result<(), String> {
-    let store = match app.store("pending_actions.json") {
-        Ok(s) => s,
-        Err(e) => return Err(format!("History store failure: {}", e)),
-    };
-
-    let mut actions: Vec<SyncAction> = match store.get("pending") {
-        Some(val) => serde_json::from_value(val).unwrap_or_default(),
-        None => Vec::new(),
-    };
-
-    actions.push(SyncAction {
-        action_id: Uuid::new_v4().to_string(),
-        r#type: action_type,
-        entity_id,
-        entity_type,
-        status,
-        payload,
-        notes,
-        timestamp: Utc::now().to_rfc3339(),
-    });
-
-    // Limit to last 50 actions to keep file size reasonable
-    if actions.len() > 50 {
-        actions.drain(0..actions.len() - 50);
-    }
-
-    store.set("pending", json!(actions));
-    match store.save() {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("Failed to save pending action: {}", e)),
-    }
-}
-
-#[tauri::command]
-async fn get_tasks(app: AppHandle) -> Result<Vec<Ticket>, String> {
-    let base_store = match app.store("base_state.json") {
-        Ok(s) => s,
-        Err(e) => return Err(format!("Base state store failure: {}", e)),
-    };
-    let base_tickets: Vec<Ticket> = match base_store.get("tickets") {
-        Some(val) => serde_json::from_value(val).unwrap_or_default(),
-        None => Vec::new(),
-    };
-
-    let pending_store = match app.store("pending_actions.json") {
-        Ok(s) => s,
-        Err(e) => return Err(format!("Pending actions store failure: {}", e)),
-    };
-    let pending_actions: Vec<SyncAction> = match pending_store.get("pending") {
-        Some(val) => serde_json::from_value(val).unwrap_or_default(),
-        None => Vec::new(),
-    };
-
-    Ok(normalize_projected_tasks(project_state(base_tickets, &pending_actions)))
-}
-
 // Extract system prompt building into a separate function that can be called multiple times
 async fn build_system_prompt_with_fresh_context(app: AppHandle) -> Result<String, String> {
     // Fetch current tasks for context
-    let current_tasks = get_tasks(app.clone()).await.unwrap_or_default();
-    let context_str = serde_json::to_string_pretty(&current_tasks).unwrap_or_else(|_| "[]".to_string());
+    let current_tickets = load_tickets_state(app.clone()).await.unwrap_or_default();
+    let context_str = serde_json::to_string_pretty(&current_tickets).unwrap_or_else(|_| "[]".to_string());
     
     // Fetch recent actions from pending store for action history
     let pending_store = match app.store("pending_actions.json") {
@@ -666,9 +199,9 @@ TICKET TYPES:
 
 TOOL EXAMPLES:
 - create_ticket: {{\"type\": \"TASK\", \"title\": \"Walk the dog\", \"rrule\": \"DTSTART:20260320T140000Z\"}}
-- edit_ticket: {{\"task_id\": \"uuid\", \"rrule\": \"DTSTART:20260322T090000Z\"}}
-- edit_ticket: {{\"task_id\": \"uuid\", \"title\": \"Walk the dog (Jimbo)\"}}
-- edit_ticket: {{\"task_id\": \"uuid\", \"rrule\": \"DTSTART:20260326T100000Z\"}}
+- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260322T090000Z\"}}
+- edit_ticket: {{\"ticket_id\": \"uuid\", \"title\": \"Walk the dog (Jimbo)\"}}
+- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260326T100000Z\"}}
 - create_ticket: {{\"type\": \"EVENT\", \"title\": \"Yoga\", \"rrule\": \"DTSTART:20260326T100000Z\", \"duration_minutes\": 120}}
 - create_ticket: {{\"type\": \"HABIT\", \"title\": \"Morning workout\", \"rrule\": \"DTSTART:20260320T070000Z RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\"}}
 - create_ticket: {{\"type\": \"EVENT\", \"title\": \"Jimbo birthday party\", \"rrule\": \"DTSTART:20260327T190000Z\"}}
@@ -691,45 +224,9 @@ REMEMBER:
     Ok(full_prompt)
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
-struct PlannerCommitment {
-    r#type: Option<String>,
-    title: Option<String>,
-    rrule: Option<String>,
-    duration_minutes: Option<i64>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct PlannerDependencyImpact {
-    ticket_id: String,
-    title: Option<String>,
-    reason: String,
-    action_required: bool,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct PlannerAction {
-    tool: String,
-    arguments: Value,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct PlannerPlan {
-    user_goal: String,
-    grounded_facts: Vec<String>,
-    time_constraints: Vec<String>,
-    existing_tickets_relevant: Vec<String>,
-    dependent_tickets_impacted: Vec<PlannerDependencyImpact>,
-    new_commitments_detected: Vec<PlannerCommitment>,
-    proactive_opportunities: Vec<String>,
-    assumptions_to_apply: Vec<String>,
-    tool_actions: Vec<PlannerAction>,
-    user_reply_strategy: String,
-}
-
 async fn build_planner_prompt(app: AppHandle, tools: &[Tool]) -> Result<String, String> {
-    let current_tasks = get_tasks(app.clone()).await.unwrap_or_default();
-    let context_str = serde_json::to_string_pretty(&current_tasks).unwrap_or_else(|_| "[]".to_string());
+    let current_tickets = load_tickets_state(app.clone()).await.unwrap_or_default();
+    let context_str = serde_json::to_string_pretty(&current_tickets).unwrap_or_else(|_| "[]".to_string());
 
     let pending_store = match app.store("pending_actions.json") {
         Ok(s) => s,
@@ -834,260 +331,6 @@ Planning rules:
     ))
 }
 
-fn extract_first_json_value(content: &str) -> Option<Value> {
-    if let Ok(value) = serde_json::from_str::<Value>(content) {
-        return Some(value);
-    }
-
-    let trimmed = content.trim();
-    if let Some(stripped) = trimmed.strip_prefix("```") {
-        let without_lang = if let Some(newline_idx) = stripped.find('\n') {
-            &stripped[newline_idx + 1..]
-        } else {
-            stripped
-        };
-        if let Some(end_idx) = without_lang.rfind("```") {
-            let candidate = &without_lang[..end_idx].trim();
-            if let Ok(value) = serde_json::from_str::<Value>(candidate) {
-                return Some(value);
-            }
-        }
-    }
-
-    if let Some(start) = content.find('{') {
-        if let Some(end) = content.rfind('}') {
-            if end > start {
-                let candidate = &content[start..=end];
-                if let Ok(value) = serde_json::from_str::<Value>(candidate) {
-                    return Some(value);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn has_matching_edit_action(plan: &PlannerPlan, ticket_id: &str) -> bool {
-    plan.tool_actions.iter().any(|action| {
-        action.tool == "edit_ticket"
-            && action.arguments.get("task_id").and_then(Value::as_str) == Some(ticket_id)
-    })
-}
-
-fn validate_plan(plan: PlannerPlan, tools: &[Tool]) -> Result<PlannerPlan, String> {
-    if plan.user_goal.trim().is_empty() {
-        return Err("planner returned an empty user_goal".to_string());
-    }
-
-    if plan.user_reply_strategy.trim().is_empty() {
-        return Err("planner returned an empty user_reply_strategy".to_string());
-    }
-
-    if !plan.tool_actions.is_empty() && plan.grounded_facts.is_empty() {
-        return Err("planner proposed tool actions without grounded facts".to_string());
-    }
-
-    if plan.grounded_facts.iter().any(|fact| fact.trim().is_empty()) {
-        return Err("planner returned an empty grounded fact".to_string());
-    }
-
-    if plan.time_constraints.iter().any(|constraint| constraint.trim().is_empty()) {
-        return Err("planner returned an empty time constraint".to_string());
-    }
-
-    if plan.existing_tickets_relevant.iter().any(|ticket| ticket.trim().is_empty()) {
-        return Err("planner returned an empty relevant-ticket reference".to_string());
-    }
-
-    if plan.proactive_opportunities.iter().any(|opportunity| opportunity.trim().is_empty()) {
-        return Err("planner returned an empty proactive opportunity".to_string());
-    }
-
-    if plan.assumptions_to_apply.iter().any(|assumption| assumption.trim().is_empty()) {
-        return Err("planner returned an empty assumption".to_string());
-    }
-
-    if plan.tool_actions.len() > 8 {
-        return Err("planner returned too many actions".to_string());
-    }
-
-    let mut seen_impacts = HashSet::new();
-    for impact in &plan.dependent_tickets_impacted {
-        if impact.ticket_id.trim().is_empty() {
-            return Err("planner returned a dependent ticket with an empty ticket_id".to_string());
-        }
-
-        if impact.reason.trim().is_empty() {
-            return Err(format!(
-                "planner returned an empty dependency reason for ticket '{}'",
-                impact.ticket_id
-            ));
-        }
-
-        if let Some(title) = impact.title.as_deref() {
-            if title.trim().is_empty() {
-                return Err(format!(
-                    "planner returned an empty dependency title for ticket '{}'",
-                    impact.ticket_id
-                ));
-            }
-        }
-
-        if !seen_impacts.insert(impact.ticket_id.as_str()) {
-            return Err(format!(
-                "planner listed dependent ticket '{}' more than once",
-                impact.ticket_id
-            ));
-        }
-    }
-
-    let mut seen_commitments = HashSet::new();
-    for commitment in &plan.new_commitments_detected {
-        let title = commitment.title.as_deref().map(str::trim);
-
-        if title == Some("") {
-            return Err("planner returned a commitment with an empty title".to_string());
-        }
-
-        if title.is_none()
-            && (commitment.r#type.is_some() || commitment.rrule.is_some() || commitment.duration_minutes.is_some())
-        {
-            return Err("planner returned a commitment with scheduling details but no title".to_string());
-        }
-
-        if let Some(title) = title {
-            let normalized_title = title.to_ascii_lowercase();
-            if !seen_commitments.insert(normalized_title.clone()) {
-                return Err(format!(
-                    "planner listed commitment '{}' more than once",
-                    title
-                ));
-            }
-        }
-    }
-
-    let tool_map: HashMap<&str, &Tool> = tools.iter()
-        .map(|tool| (tool.function.name.as_str(), tool))
-        .collect();
-
-    for action in &plan.tool_actions {
-        let tool = tool_map
-            .get(action.tool.as_str())
-            .ok_or_else(|| format!("planner used unknown tool '{}'", action.tool))?;
-
-        let args = action.arguments.as_object()
-            .ok_or_else(|| format!("planner arguments for '{}' must be a JSON object", action.tool))?;
-
-        let schema = tool.function.parameters.as_object()
-            .ok_or_else(|| format!("tool '{}' has invalid schema", action.tool))?;
-
-        let allowed_keys: Vec<String> = schema.get("properties")
-            .and_then(|v| v.as_object())
-            .map(|props| props.keys().cloned().collect())
-            .unwrap_or_default();
-
-        for key in args.keys() {
-            if !allowed_keys.iter().any(|allowed| allowed == key) {
-                return Err(format!("planner used unsupported argument '{}' for tool '{}'", key, action.tool));
-            }
-        }
-
-        if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
-            for required_key in required.iter().filter_map(|v| v.as_str()) {
-                if !args.contains_key(required_key) {
-                    return Err(format!("planner omitted required argument '{}' for tool '{}'", required_key, action.tool));
-                }
-            }
-        }
-
-        if action.tool == "create_ticket" {
-            let ticket_type = args.get("type").and_then(Value::as_str).unwrap_or_default();
-            let has_duration = args.get("duration_minutes").and_then(Value::as_i64).is_some();
-            let has_schedule = args.get("rrule").and_then(Value::as_str).is_some();
-
-            if ticket_type == "EVENT" && has_duration && !has_schedule {
-                return Err("planner created a timed EVENT without an rrule/DTSTART schedule".to_string());
-            }
-        }
-    }
-
-    for commitment in &plan.new_commitments_detected {
-        let Some(title) = commitment.title.as_deref() else {
-            continue;
-        };
-
-        let matching_create = plan.tool_actions.iter().find(|action| {
-            action.tool == "create_ticket"
-                && action.arguments.get("title").and_then(Value::as_str)
-                    .map(|candidate| candidate.eq_ignore_ascii_case(title))
-                    .unwrap_or(false)
-        });
-
-        if commitment.rrule.is_some() || commitment.duration_minutes.is_some() || commitment.r#type.is_some() {
-            let action = matching_create.ok_or_else(|| {
-                format!("planner detected commitment '{}' but did not create a matching ticket action", title)
-            })?;
-
-            if let Some(expected_type) = commitment.r#type.as_deref() {
-                let actual_type = action.arguments.get("type").and_then(Value::as_str);
-                if actual_type != Some(expected_type) {
-                    return Err(format!(
-                        "planner commitment '{}' expected type '{}' but create_ticket used '{:?}'",
-                        title,
-                        expected_type,
-                        actual_type
-                    ));
-                }
-            }
-
-            if let Some(expected_rrule) = commitment.rrule.as_deref() {
-                let actual_rrule = action.arguments.get("rrule").and_then(Value::as_str);
-                if actual_rrule != Some(expected_rrule) {
-                    return Err(format!(
-                        "planner commitment '{}' expected schedule '{}' but create_ticket used '{:?}'",
-                        title,
-                        expected_rrule,
-                        actual_rrule
-                    ));
-                }
-            }
-
-            if let Some(expected_duration) = commitment.duration_minutes {
-                let actual_duration = action.arguments.get("duration_minutes").and_then(Value::as_i64);
-                if actual_duration != Some(expected_duration) {
-                    return Err(format!(
-                        "planner commitment '{}' expected duration '{}' but create_ticket used '{:?}'",
-                        title,
-                        expected_duration,
-                        actual_duration
-                    ));
-                }
-            }
-        }
-    }
-
-    for impact in &plan.dependent_tickets_impacted {
-        let matching_edit = has_matching_edit_action(&plan, &impact.ticket_id);
-
-        if impact.action_required && !matching_edit {
-            return Err(format!(
-                "planner marked dependent ticket '{}' as requiring action but did not include a matching edit_ticket action",
-                impact.ticket_id
-            ));
-        }
-
-        if !impact.action_required && matching_edit {
-            return Err(format!(
-                "planner edited dependent ticket '{}' without marking action_required=true",
-                impact.ticket_id
-            ));
-        }
-    }
-
-    Ok(plan)
-}
-
 async fn generate_model_message(
     config: &ProviderConfig,
     messages: &[Message],
@@ -1158,55 +401,6 @@ async fn plan_actions(
             Ok(None)
         }
     }
-}
-
-fn build_planner_execution_note(plan: &PlannerPlan, tool_results: &[(PlannerAction, String)]) -> String {
-    let dependency_lines = plan.dependent_tickets_impacted.iter()
-        .map(|impact| {
-            let title = impact.title.as_deref().unwrap_or("Unknown");
-            format!(
-                "- {} ({}) => {} [{}]",
-                title,
-                impact.ticket_id,
-                impact.reason,
-                if impact.action_required { "action required" } else { "info only" }
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let commitments = plan.new_commitments_detected.iter()
-        .filter_map(|commitment| {
-            commitment.title.as_ref().map(|title| {
-                let kind = commitment.r#type.as_deref().unwrap_or("UNKNOWN");
-                let timing = commitment.rrule.as_deref().unwrap_or("no schedule");
-                let duration = commitment.duration_minutes
-                    .map(|value| format!(", duration {} min", value))
-                    .unwrap_or_default();
-                format!("- {} ({}) @ {}{}", title, kind, timing, duration)
-            })
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let action_lines = tool_results.iter()
-        .map(|(action, result)| format!("- {} {} => {}", action.tool, action.arguments, result))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    format!(
-        "PLANNER SUMMARY:\nGoal: {}\nGrounded facts:\n{}\nTime constraints:\n{}\nRelevant tickets:\n{}\nDependent tickets impacted:\n{}\nDetected commitments:\n{}\nProactive opportunities:\n{}\nAssumptions applied:\n{}\nExecuted actions:\n{}\nReply strategy: {}\nUse this summary and the refreshed stack to answer the user naturally. Do not call tools again.",
-        plan.user_goal,
-        if plan.grounded_facts.is_empty() { "- none".to_string() } else { plan.grounded_facts.iter().map(|fact| format!("- {}", fact)).collect::<Vec<_>>().join("\n") },
-        if plan.time_constraints.is_empty() { "- none".to_string() } else { plan.time_constraints.iter().map(|constraint| format!("- {}", constraint)).collect::<Vec<_>>().join("\n") },
-        if plan.existing_tickets_relevant.is_empty() { "- none".to_string() } else { plan.existing_tickets_relevant.iter().map(|ticket| format!("- {}", ticket)).collect::<Vec<_>>().join("\n") },
-        if dependency_lines.is_empty() { "- none".to_string() } else { dependency_lines },
-        if commitments.is_empty() { "- none".to_string() } else { commitments },
-        if plan.proactive_opportunities.is_empty() { "- none".to_string() } else { plan.proactive_opportunities.iter().map(|item| format!("- {}", item)).collect::<Vec<_>>().join("\n") },
-        if plan.assumptions_to_apply.is_empty() { "- none".to_string() } else { plan.assumptions_to_apply.iter().map(|item| format!("- {}", item)).collect::<Vec<_>>().join("\n") },
-        if action_lines.is_empty() { "- none".to_string() } else { action_lines },
-        plan.user_reply_strategy,
-    )
 }
 
 #[tauri::command]
@@ -1369,21 +563,21 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     }
                 }
                 "delete_ticket" => {
-                    let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
-                    if task_id.is_empty() {
-                        return Ok("⚠️ Tool failed: task_id missing. The agent should identify the correct task_id from the conversation context and try again.".to_string());
+                    let ticket_id = args.get("ticket_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if ticket_id.is_empty() {
+                        return Ok("⚠️ Tool failed: ticket_id missing. The agent should identify the correct ticket_id from the conversation context and try again.".to_string());
                     }
                     
-                    let tasks = get_tasks(app.clone()).await.unwrap_or_default();
-                    let actual_entity_type = tasks.iter()
-                        .find(|t| t.id == task_id)
+                    let tickets = load_tickets_state(app.clone()).await.unwrap_or_default();
+                    let actual_entity_type = tickets.iter()
+                        .find(|t| t.id == ticket_id)
                         .map(|t| format!("{:?}", t.r#type).to_uppercase())
                         .unwrap_or_else(|| "TASK".to_string());
 
                     match append_pending_action(
                         &app,
                         SyncActionType::Delete,
-                        task_id.to_string(),
+                        ticket_id.to_string(),
                         actual_entity_type, 
                         None,
                         None,
@@ -1394,12 +588,12 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     }
                 }
                 "delete_all_tickets" => {
-                    let tasks = match get_tasks(app.clone()).await {
+                    let tickets = match load_tickets_state(app.clone()).await {
                         Ok(t) => t,
                         Err(e) => return Ok(format!("⚠️ Tool failed: Could not retrieve tasks: {}", e)),
                     };
                     
-                    if tasks.is_empty() {
+                    if tickets.is_empty() {
                         return Ok("⚠️ Tool failed: no tickets to delete.".to_string());
                     }
                     
@@ -1408,12 +602,12 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                             .and_then(|val| serde_json::from_value(val).ok())
                             .unwrap_or_default();
                             
-                        for task in tasks {
+                        for ticket in tickets {
                             actions.push(SyncAction {
                                 action_id: Uuid::new_v4().to_string(),
                                 r#type: SyncActionType::Delete,
-                                entity_id: task.id,
-                                entity_type: format!("{:?}", task.r#type).to_uppercase(),
+                                entity_id: ticket.id,
+                                entity_type: format!("{:?}", ticket.r#type).to_uppercase(),
                                 status: None,
                                 payload: None,
                                 notes: None,
@@ -1428,13 +622,13 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     Ok("All tickets deleted.".to_string())
                 }
                 "edit_ticket" => {
-                    let task_id = args.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
-                    if task_id.is_empty() {
-                        return Ok("⚠️ Tool failed: task_id missing.".to_string());
+                    let ticket_id = args.get("ticket_id").and_then(|v| v.as_str()).unwrap_or("");
+                    if ticket_id.is_empty() {
+                        return Ok("⚠️ Tool failed: ticket_id missing.".to_string());
                     }
 
-                    let tasks = get_tasks(app.clone()).await.unwrap_or_default();
-                    let existing_ticket = tasks.iter().find(|t| t.id == task_id);
+                    let tickets = load_tickets_state(app.clone()).await.unwrap_or_default();
+                    let existing_ticket = tickets.iter().find(|t| t.id == ticket_id);
                     
                     let updated_entity_type = if let Some(new_type) = args.get("type").and_then(|v| v.as_str()) {
                         new_type.to_uppercase()
@@ -1548,7 +742,7 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     match append_pending_action(
                         &app,
                         SyncActionType::Update,
-                        task_id.to_string(),
+                        ticket_id.to_string(),
                         updated_entity_type, 
                         if payload_updates.is_empty() { None } else { Some(TicketPayload::Generic(serde_json::Value::Object(payload_updates))) },
                         None,
@@ -1556,11 +750,11 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                     ).await {
                         Ok(_) => {
                             if let Some(projected) = inferred_event_payload.as_ref() {
-                                if let Err(e) = sync_inferred_event_commute(&app, task_id, Some(projected)).await {
+                                if let Err(e) = sync_inferred_event_commute(&app, ticket_id, Some(projected)).await {
                                     return Ok(format!("⚠️ Tool failed: {}.", e));
                                 }
                             } else if existing_ticket.map(|ticket| matches!(ticket.r#type, hstack_core::ticket::TicketType::Event)).unwrap_or(false) {
-                                if let Err(e) = sync_inferred_event_commute(&app, task_id, None).await {
+                                if let Err(e) = sync_inferred_event_commute(&app, ticket_id, None).await {
                                     return Ok(format!("⚠️ Tool failed: {}.", e));
                                 }
                             }
@@ -1854,111 +1048,37 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
     }
 }
 
-#[tauri::command]
-async fn apply_sync_update(app: AppHandle, new_base_tickets: Vec<Ticket>) -> Result<(), String> {
-    let base_store = match app.store("base_state.json") {
-        Ok(s) => s,
-        Err(e) => return Err(format!("Base state store failure: {}", e)),
-    };
-    base_store.set("tickets", json!(new_base_tickets));
-    let _ = base_store.save();
-
-    let pending_store = match app.store("pending_actions.json") {
-        Ok(s) => s,
-        Err(e) => return Err(format!("Pending actions store failure: {}", e)),
-    };
-
-    let pending_actions: Vec<SyncAction> = match pending_store.get("pending") {
-        Some(val) => serde_json::from_value(val).unwrap_or_default(),
-        None => Vec::new(),
-    };
-
-    let remaining_actions = reconcile_state(&new_base_tickets, pending_actions);
-    
-    pending_store.set("pending", json!(remaining_actions));
-    match pending_store.save() {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("Failed to update pending actions after sync: {}", e)),
-    }
-}
-
-#[tauri::command]
-async fn get_user_locale(app: AppHandle) -> Result<(String, bool), String> {
-    let settings = get_settings(app).await?;
-    let locale = settings.locale.unwrap_or_else(|| {
-        // Default to en-US if not set
-        "en-US".to_string()
-    });
-    let hour12 = settings.hour12.unwrap_or(true);
-    Ok((locale, hour12))
-}
-
-#[tauri::command]
-async fn get_sync_session(app: AppHandle) -> Result<SyncSessionInfo, String> {
-    let settings = get_settings(app.clone()).await?;
-    let token = SecureStore::get_key(&app, SYNC_TOKEN_KEY)?;
-
-    Ok(SyncSessionInfo {
-        user_id: settings.sync_user_id,
-        user_name: settings.sync_user_name,
-        token: if token.is_empty() { None } else { Some(token) },
-    })
-}
-
-#[tauri::command]
-async fn save_sync_session(app: AppHandle, user_id: i64, user_name: String, token: String) -> Result<(), String> {
-    SecureStore::set_key(&app, SYNC_TOKEN_KEY, &token)?;
-
-    let mut settings = get_settings(app.clone()).await?;
-    settings.sync_user_id = Some(user_id);
-    settings.sync_user_name = Some(user_name);
-    save_settings(app, settings).await
-}
-
-#[tauri::command]
-async fn clear_sync_session(app: AppHandle) -> Result<(), String> {
-    let _ = SecureStore::delete_key(&app, SYNC_TOKEN_KEY);
-
-    let mut settings = get_settings(app.clone()).await?;
-    settings.sync_user_id = None;
-    settings.sync_user_name = None;
-    save_settings(app, settings).await
-}
-
-#[tauri::command]
-async fn complete_onboarding(app: AppHandle, mode: String) -> Result<(), String> {
-    let mut settings = get_settings(app.clone()).await?;
-    settings.onboarding_complete = true;
-    settings.sync_mode = match mode.as_str() {
-        "CloudOfficial" => SyncMode::CloudOfficial,
-        "CloudCustom" => SyncMode::CloudCustom,
-        _ => SyncMode::LocalOnly,
-    };
-    save_settings(app, settings).await
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = match tauri::Builder::default()
+        .manage(NativeSyncRuntimeState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
-            get_settings,
-            save_settings,
-            upsert_provider,
-            delete_provider,
+            app_state::get_settings,
+            app_state::save_settings,
+            app_state::upsert_provider,
+            app_state::delete_provider,
             chat_local,
-            get_tasks,
-            apply_sync_update,
-            get_user_locale,
-            get_sync_session,
-            save_sync_session,
-            clear_sync_session,
-            complete_onboarding
+            app_state::get_tickets,
+            app_state::apply_sync_update,
+            app_state::get_user_locale,
+            app_state::get_sync_session,
+            app_state::save_sync_session,
+            app_state::clear_sync_session,
+            app_state::complete_onboarding,
+            sync_runtime::start_native_sync,
+            sync_runtime::stop_native_sync,
+            sync_runtime::get_sync_connection_status,
+            sync_runtime::queue_sync_action,
+            sync_runtime::sync_refresh_now
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app_handle, event| {
+        .build(tauri::generate_context!()) {
+            Ok(app) => app,
+            Err(error) => panic!("error while building tauri application: {error}"),
+        };
+
+    app.run(|app_handle, event| {
             #[cfg(desktop)]
             {
                 if let tauri::RunEvent::Reopen { .. } = event {
@@ -1979,10 +1099,54 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_first_json_value, format_saved_locations_for_prompt, infer_commute_payload_from_event, normalize_legacy_commute_payload, resolve_commute_location, validate_plan, PlannerAction, PlannerCommitment, PlannerDependencyImpact, PlannerPlan};
+    use super::{extract_first_json_value, format_saved_locations_for_prompt, infer_commute_payload_from_event, resolve_commute_location, validate_plan, PlannerAction, PlannerPlan};
+    use crate::location_utils::normalize_legacy_commute_payload;
+    use crate::planner_support::{PlannerCommitment, PlannerDependencyImpact};
     use hstack_core::settings::{SavedLocation, UserSettings};
     use hstack_core::ticket::{tool_schemas, TicketLocation, TicketPayload};
-    use serde_json::json;
+    use serde::Serialize;
+    use serde_json::{json, Value};
+
+    fn must_extract_json_value(input: &str) -> Value {
+        match extract_first_json_value(input) {
+            Some(value) => value,
+            None => panic!("expected fenced JSON to parse"),
+        }
+    }
+
+    fn assert_plan_is_valid(plan: PlannerPlan) {
+        if let Err(error) = validate_plan(plan, &tool_schemas()) {
+            panic!("expected valid planner plan: {error}");
+        }
+    }
+
+    fn expect_plan_validation_error(plan: PlannerPlan) -> String {
+        match validate_plan(plan, &tool_schemas()) {
+            Ok(_) => panic!("expected validation to fail"),
+            Err(error) => error,
+        }
+    }
+
+    fn must_infer_commute_payload(event_id: &str, payload: &TicketPayload) -> TicketPayload {
+        match infer_commute_payload_from_event(event_id, payload) {
+            Some(commute) => commute,
+            None => panic!("expected a commute to be inferred"),
+        }
+    }
+
+    fn expect_commute_location_error(args: &Value, settings: &UserSettings) -> String {
+        match resolve_commute_location(args, "origin_location", "origin", "origin location", settings) {
+            Ok(_) => panic!("expected location resolution to fail"),
+            Err(error) => error,
+        }
+    }
+
+    fn must_json_value<T: Serialize>(value: T) -> Value {
+        match serde_json::to_value(value) {
+            Ok(json) => json,
+            Err(error) => panic!("expected value to serialize in test: {error}"),
+        }
+    }
 
     fn settings_with_home() -> UserSettings {
         UserSettings {
@@ -2034,7 +1198,7 @@ mod tests {
                 PlannerAction {
                     tool: "edit_ticket".to_string(),
                     arguments: json!({
-                        "task_id": "task-buy-flowers",
+                        "ticket_id": "ticket-buy-flowers",
                         "rrule": "DTSTART:20260320T140000Z"
                     }),
                 },
@@ -2045,8 +1209,7 @@ mod tests {
 
     #[test]
     fn extracts_json_from_fenced_planner_output() {
-        let parsed = extract_first_json_value("```json\n{\"user_goal\":\"Plan\"}\n```")
-            .expect("expected fenced JSON to parse");
+        let parsed = must_extract_json_value("```json\n{\"user_goal\":\"Plan\"}\n```");
 
         assert_eq!(parsed.get("user_goal").and_then(|value| value.as_str()), Some("Plan"));
     }
@@ -2055,7 +1218,7 @@ mod tests {
     fn validates_dependency_aware_plan() {
         let plan = sample_plan();
 
-        validate_plan(plan, &tool_schemas()).expect("expected valid planner plan");
+        assert_plan_is_valid(plan);
     }
 
     #[test]
@@ -2063,7 +1226,7 @@ mod tests {
         let mut plan = sample_plan();
         plan.grounded_facts.clear();
 
-        let error = validate_plan(plan, &tool_schemas()).expect_err("expected validation to fail");
+        let error = expect_plan_validation_error(plan);
         assert!(error.contains("grounded facts"));
     }
 
@@ -2072,7 +1235,7 @@ mod tests {
         let mut plan = sample_plan();
         plan.new_commitments_detected[0].title = None;
 
-        let error = validate_plan(plan, &tool_schemas()).expect_err("expected validation to fail");
+        let error = expect_plan_validation_error(plan);
         assert!(error.contains("no title"));
     }
 
@@ -2086,7 +1249,7 @@ mod tests {
             action_required: false,
         });
 
-        let error = validate_plan(plan, &tool_schemas()).expect_err("expected validation to fail");
+        let error = expect_plan_validation_error(plan);
         assert!(error.contains("more than once"));
     }
 
@@ -2095,7 +1258,7 @@ mod tests {
         let mut plan = sample_plan();
         plan.dependent_tickets_impacted[0].action_required = false;
 
-        let error = validate_plan(plan, &tool_schemas()).expect_err("expected validation to fail");
+        let error = expect_plan_validation_error(plan);
         assert!(error.contains("action_required=true"));
     }
 
@@ -2106,8 +1269,10 @@ mod tests {
             "origin": "221B Baker Street, London"
         });
 
-        let (display, location) = resolve_commute_location(&args, "origin_location", "origin", "origin location", &settings)
-            .expect("expected strict location normalization to succeed");
+        let (display, location) = match resolve_commute_location(&args, "origin_location", "origin", "origin location", &settings) {
+            Ok(value) => value,
+            Err(error) => panic!("expected strict location normalization to succeed: {error}"),
+        };
 
         assert_eq!(display, "221B Baker Street, London");
         assert_eq!(location, TicketLocation::AddressText {
@@ -2127,8 +1292,7 @@ mod tests {
             }
         });
 
-        let error = resolve_commute_location(&args, "origin_location", "origin", "origin location", &settings)
-            .expect_err("expected mismatch to fail");
+        let error = expect_commute_location_error(&args, &settings);
 
         assert!(error.contains("does not match structured location"));
     }
@@ -2140,8 +1304,7 @@ mod tests {
             "origin": "Home"
         });
 
-        let error = resolve_commute_location(&args, "origin_location", "origin", "origin location", &settings)
-            .expect_err("expected saved-location raw text to fail");
+        let error = expect_commute_location_error(&args, &settings);
 
         assert!(error.contains("use location_id"));
     }
@@ -2153,8 +1316,7 @@ mod tests {
             "origin": "my place"
         });
 
-        let error = resolve_commute_location(&args, "origin_location", "origin", "origin location", &settings)
-            .expect_err("expected ambiguous location text to fail");
+        let error = expect_commute_location_error(&args, &settings);
 
         assert!(error.contains("ambiguous"));
     }
@@ -2184,8 +1346,7 @@ mod tests {
             completed: Some(false),
         };
 
-        let commute = infer_commute_payload_from_event("event-1", &payload)
-            .expect("expected a commute to be inferred");
+        let commute = must_infer_commute_payload("event-1", &payload);
 
         match commute {
             TicketPayload::Commute {
@@ -2199,7 +1360,7 @@ mod tests {
                 assert_eq!(destination, "12 Rue de Rivoli, Paris");
                 assert_eq!(related_event_id.as_deref(), Some("event-1"));
                 assert_eq!(scheduled_time_iso.as_deref(), Some("2026-03-28T19:30:00+00:00"));
-                assert_eq!(serde_json::to_value(departure_time).unwrap(), json!({
+                assert_eq!(must_json_value(departure_time), json!({
                     "departure_type": "relative_to_arrival",
                     "buffer_minutes": 10
                 }));
@@ -2256,7 +1417,7 @@ mod tests {
 
         match payload {
             TicketPayload::Commute { departure_time, .. } => {
-                assert_eq!(serde_json::to_value(departure_time).unwrap(), json!({
+                assert_eq!(must_json_value(departure_time), json!({
                     "departure_type": "relative_to_arrival",
                     "buffer_minutes": 10
                 }));
