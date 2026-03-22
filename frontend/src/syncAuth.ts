@@ -7,6 +7,7 @@ interface RemoteUser {
   id: number;
   first_name: string;
   last_name: string;
+  email?: string | null;
 }
 
 interface RemoteAuthResponse {
@@ -19,6 +20,7 @@ interface RemoteAuthRequest {
   mode: RemoteAuthMode;
   firstName: string;
   lastName?: string;
+  email?: string;
   password: string;
 }
 
@@ -69,6 +71,7 @@ export const authenticateRemote = async ({
   mode,
   firstName,
   lastName,
+  email,
   password,
 }: RemoteAuthRequest): Promise<RemoteAuthResponse> => {
   const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
@@ -77,10 +80,11 @@ export const authenticateRemote = async ({
       ? {
           first_name: firstName.trim(),
           last_name: lastName?.trim() || null,
+          email: email?.trim() || null,
           password,
         }
       : {
-          first_name: firstName.trim(),
+          email: firstName.trim(),
           password,
         };
 

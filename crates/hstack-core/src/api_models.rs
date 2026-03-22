@@ -1,3 +1,5 @@
+// Shared API contract types.
+// Review docs/public-private-contract.md before adding fields that may reflect private-only backend behavior.
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
@@ -8,12 +10,13 @@ use crate::integration::{AuthIdentity, AuthProvider, ConnectionStatus, ExternalR
 pub struct UserCreate {
     pub first_name: String,
     pub last_name: Option<String>,
+    pub email: Option<String>,
     pub password: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserLogin {
-    pub first_name: String,
+    pub email: String,
     pub password: String,
 }
 
@@ -41,6 +44,7 @@ pub struct UserDTO {
     pub id: i64,
     pub first_name: String,
     pub last_name: String,
+    pub email: Option<String>,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub auth_identities: Vec<AuthIdentity>,

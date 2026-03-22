@@ -1,3 +1,5 @@
+// Minimal public server implementation.
+// Review docs/public-private-contract.md before adding backend complexity that belongs in the private server.
 use hstack_core::api_models::{UserCreate, UserLogin, AuthResponse, UserDTO, CreateTaskPayload};
 use axum::{
     routing::{get, post},
@@ -23,8 +25,11 @@ async fn main() {
     let pool = SqlitePool::connect(&db_url).await.expect("Failed to connect to SQLite");
     
     // Minimal schema setup
-    sqlx::query("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, first_name TEXT, password TEXT, created_at DATETIME)")
+    sqlx::query("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, first_name TEXT, email TEXT, password TEXT, created_at DATETIME)")
         .execute(&pool).await.unwrap();
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN email TEXT")
+        .execute(&pool)
+        .await;
     sqlx::query("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, userid INTEGER, type TEXT, payload TEXT, status TEXT, created_at DATETIME)")
         .execute(&pool).await.unwrap();
 
@@ -44,8 +49,9 @@ async fn main() {
 
 async fn register(State(state): State<AppState>, Json(payload): Json<UserCreate>) -> Result<Json<AuthResponse>, StatusCode> {
     let hashed = bcrypt::hash(payload.password.unwrap_or_default(), bcrypt::DEFAULT_COST).unwrap();
-    let id = sqlx::query("INSERT INTO users (first_name, password, created_at) VALUES (?, ?, ?)")
+    let id = sqlx::query("INSERT INTO users (first_name, email, password, created_at) VALUES (?, ?, ?, ?)")
         .bind(&payload.first_name)
+        .bind(payload.email.as_deref())
         .bind(&hashed)
         .bind(Utc::now())
         .execute(&state.db)
@@ -59,14 +65,21 @@ async fn register(State(state): State<AppState>, Json(payload): Json<UserCreate>
             id,
             first_name: payload.first_name,
             last_name: payload.last_name.unwrap_or_default(),
+            email: payload.email,
             created_at: Utc::now(),
+            auth_identities: Vec::new(),
         }
     }))
 }
 
 async fn login(State(state): State<AppState>, Json(payload): Json<UserLogin>) -> Result<Json<AuthResponse>, StatusCode> {
-    let row = sqlx::query("SELECT id, first_name, password FROM users WHERE first_name = ?")
-        .bind(&payload.first_name)
+    let email = payload.email.trim();
+    if email.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let row = sqlx::query("SELECT id, first_name, email, password FROM users WHERE lower(email) = lower(?)")
+        .bind(email)
         .fetch_optional(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -83,7 +96,9 @@ async fn login(State(state): State<AppState>, Json(payload): Json<UserLogin>) ->
             id: row.get("id"),
             first_name: row.get("first_name"),
             last_name: "".to_string(),
+            email: row.try_get("email").ok(),
             created_at: Utc::now(),
+            auth_identities: Vec::new(),
         }
     }))
 }
@@ -123,8 +138,6 @@ async fn create_task(State(state): State<AppState>, Json(payload): Json<CreateTa
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_bcrypt_logic() {
         let password = "password123";

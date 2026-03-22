@@ -1,4 +1,5 @@
 use crate::provider::{ProviderKind, RateLimitConfig};
+use crate::ticket::TicketLocation;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +20,13 @@ pub enum SyncMode {
     CloudCustom,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedLocation {
+    pub id: String,
+    pub label: String,
+    pub location: TicketLocation,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserSettings {
     pub providers: Vec<SavedProvider>,
@@ -30,6 +38,7 @@ pub struct UserSettings {
     pub custom_server_url: Option<String>,
     pub sync_user_id: Option<i64>,
     pub sync_user_name: Option<String>,
+    pub saved_locations: Vec<SavedLocation>,
     pub onboarding_complete: bool,
 }
 

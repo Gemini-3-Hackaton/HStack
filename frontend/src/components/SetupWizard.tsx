@@ -94,6 +94,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
   const [authMode, setAuthMode] = useState<RemoteAuthMode>('login');
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [customServerUrl, setCustomServerUrl] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -135,13 +136,19 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
   const selectedBaseUrl = selectedMode ? resolveAuthBaseUrl(selectedMode, customServerUrl) : null;
   const officialCloudReady = isOfficialCloudConfigured();
   const isRemoteMode = selectedMode === 'CloudOfficial' || selectedMode === 'CloudCustom';
-  const canSubmitRemote = Boolean(firstName.trim() && password && selectedBaseUrl);
+  const canSubmitRemote = Boolean(
+    firstName.trim() &&
+      password &&
+      selectedBaseUrl &&
+      (authMode === 'login' || email.trim())
+  );
 
   const resetRemoteForm = () => {
     setSelectedMode(null);
     setAuthMode('login');
     setFirstName('');
     setLastName('');
+    setEmail('');
     setPassword('');
     setErrorMessage(null);
     setSavingMode(null);
@@ -205,6 +212,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
         mode: authMode,
         firstName,
         lastName,
+        email,
         password,
       });
 
@@ -339,13 +347,28 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
                   ) : null}
 
                   <WizardInput
-                    label={t('firstName')}
+                    label={authMode === 'login' ? t('email') : t('firstName')}
                     value={firstName}
                     onChange={(event) => setFirstName(event.target.value)}
-                    placeholder={authMode === 'login' ? t('accountFirstName') : t('chooseFirstName')}
-                    autoCapitalize="words"
+                    placeholder={authMode === 'login' ? t('enterEmail') : t('chooseFirstName')}
+                    autoCapitalize={authMode === 'login' ? 'none' : 'words'}
                     autoCorrect="off"
+                    spellCheck={authMode === 'login' ? false : undefined}
+                    type={authMode === 'login' ? 'email' : 'text'}
                   />
+
+                  {authMode === 'register' ? (
+                    <WizardInput
+                      label={t('email')}
+                      value={email}
+                      onChange={(event) => setEmail(event.target.value)}
+                      placeholder={t('enterEmail')}
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      type="email"
+                    />
+                  ) : null}
 
                   {authMode === 'register' ? (
                     <WizardInput
