@@ -142,7 +142,12 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
 
     let reconnectTimer: any;
     const remoteConfig = resolveRemoteSyncConfig(syncSettings, syncSession);
-    const websocketUrl = remoteConfig?.wsUrl || `ws://127.0.0.1:8000/ws/sync/${userId}`;
+    const websocketUrl = remoteConfig?.wsUrl;
+
+    if (!websocketUrl) {
+      setIsConnected(false);
+      return;
+    }
 
     const connect = async () => {
       const ws = new WebSocket(websocketUrl);
@@ -240,16 +245,7 @@ export const SyncProvider = ({ children, userId = 1 }: { children: ReactNode, us
         persistState(fullTasks, localHistory);
         console.log('State refreshed from remote server');
       } catch (err) {
-        console.warn("Primary sync fetch failed, trying legacy server fallback...", err);
-          try {
-              const res = await fetch(`http://localhost:8000/api/tasks?userid=${userId}`);
-              if (res.ok) {
-                  const fullTasks = await res.json();
-                  persistState(fullTasks, localHistory);
-              }
-          } catch (serverErr) {
-              console.error("Both fetch paths failed", serverErr);
-          }
+        console.error("Remote task fetch failed", err);
       }
   };
 

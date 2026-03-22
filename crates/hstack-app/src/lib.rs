@@ -460,7 +460,7 @@ async fn save_settings(app: AppHandle, settings: UserSettings) -> Result<(), Str
 async fn upsert_provider(app: AppHandle, provider: SavedProvider, api_key: Option<String>) -> Result<(), String> {
     // 1. If API key is provided, save it to the app's secure store (Keychain/Keystore)
     if let Some(key) = api_key {
-        SecureStore::set_key(&provider.id, &key)?;
+        SecureStore::set_key(&app, &provider.id, &key)?;
     }
 
     // 2. Update settings.json
@@ -482,7 +482,7 @@ async fn upsert_provider(app: AppHandle, provider: SavedProvider, api_key: Optio
 #[tauri::command]
 async fn delete_provider(app: AppHandle, id: String) -> Result<(), String> {
     // 1. Delete from secure store
-    let _ = SecureStore::delete_key(&id);
+    let _ = SecureStore::delete_key(&app, &id);
 
     // 2. Update settings.json
     let mut settings = get_settings(app.clone()).await?;
@@ -1223,7 +1223,7 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
     };
     
     // Resolve full config by fetching key from the app's secure store
-    let api_key = SecureStore::get_key(&active_provider.id)?;
+    let api_key = SecureStore::get_key(&app, &active_provider.id)?;
     let config = ProviderConfig {
         name: active_provider.name.clone(),
         kind: active_provider.kind.clone(),
@@ -1895,8 +1895,8 @@ async fn get_user_locale(app: AppHandle) -> Result<(String, bool), String> {
 
 #[tauri::command]
 async fn get_sync_session(app: AppHandle) -> Result<SyncSessionInfo, String> {
-    let settings = get_settings(app).await?;
-    let token = SecureStore::get_key(SYNC_TOKEN_KEY)?;
+    let settings = get_settings(app.clone()).await?;
+    let token = SecureStore::get_key(&app, SYNC_TOKEN_KEY)?;
 
     Ok(SyncSessionInfo {
         user_id: settings.sync_user_id,
@@ -1907,7 +1907,7 @@ async fn get_sync_session(app: AppHandle) -> Result<SyncSessionInfo, String> {
 
 #[tauri::command]
 async fn save_sync_session(app: AppHandle, user_id: i64, user_name: String, token: String) -> Result<(), String> {
-    SecureStore::set_key(SYNC_TOKEN_KEY, &token)?;
+    SecureStore::set_key(&app, SYNC_TOKEN_KEY, &token)?;
 
     let mut settings = get_settings(app.clone()).await?;
     settings.sync_user_id = Some(user_id);
@@ -1917,7 +1917,7 @@ async fn save_sync_session(app: AppHandle, user_id: i64, user_name: String, toke
 
 #[tauri::command]
 async fn clear_sync_session(app: AppHandle) -> Result<(), String> {
-    let _ = SecureStore::delete_key(SYNC_TOKEN_KEY);
+    let _ = SecureStore::delete_key(&app, SYNC_TOKEN_KEY);
 
     let mut settings = get_settings(app.clone()).await?;
     settings.sync_user_id = None;
@@ -1958,15 +1958,22 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| match event {
-            tauri::RunEvent::Reopen { .. } => {
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
+        .run(|app_handle, event| {
+            #[cfg(desktop)]
+            {
+                if let tauri::RunEvent::Reopen { .. } = event {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
                 }
             }
-            _ => {}
+
+            #[cfg(not(desktop))]
+            {
+                let _ = (&app_handle, &event);
+            }
         });
 }
 
