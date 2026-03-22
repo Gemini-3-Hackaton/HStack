@@ -92,6 +92,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
   const [savingMode, setSavingMode] = useState<string | null>(null);
   const [selectedMode, setSelectedMode] = useState<SyncMode | null>(null);
   const [authMode, setAuthMode] = useState<RemoteAuthMode>('login');
+  const [loginEmail, setLoginEmail] = useState('');
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
@@ -136,16 +137,19 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
   const selectedBaseUrl = selectedMode ? resolveAuthBaseUrl(selectedMode, customServerUrl) : null;
   const officialCloudReady = isOfficialCloudConfigured();
   const isRemoteMode = selectedMode === 'CloudOfficial' || selectedMode === 'CloudCustom';
+  const hasLoginEmail = loginEmail.trim().length > 0;
+  const hasRegisterFirstName = firstName.trim().length > 0;
+  const hasRegisterEmail = email.trim().length > 0;
   const canSubmitRemote = Boolean(
-    firstName.trim() &&
-      password &&
+    password.trim() &&
       selectedBaseUrl &&
-      (authMode === 'login' || email.trim())
+      (authMode === 'login' ? hasLoginEmail : hasRegisterFirstName && hasRegisterEmail)
   );
 
   const resetRemoteForm = () => {
     setSelectedMode(null);
     setAuthMode('login');
+    setLoginEmail('');
     setFirstName('');
     setLastName('');
     setEmail('');
@@ -210,6 +214,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
       const session = await authenticateRemote({
         baseUrl,
         mode: authMode,
+        loginEmail,
         firstName,
         lastName,
         email,
@@ -347,26 +352,28 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
                   ) : null}
 
                   <WizardInput
-                    label={authMode === 'login' ? t('email') : t('firstName')}
-                    value={firstName}
-                    onChange={(event) => setFirstName(event.target.value)}
-                    placeholder={authMode === 'login' ? t('enterEmail') : t('chooseFirstName')}
-                    autoCapitalize={authMode === 'login' ? 'none' : 'words'}
+                    label={t('email')}
+                    value={authMode === 'login' ? loginEmail : email}
+                    onChange={(event) =>
+                      authMode === 'login'
+                        ? setLoginEmail(event.target.value)
+                        : setEmail(event.target.value)
+                    }
+                    placeholder={t('enterEmail')}
+                    autoCapitalize="none"
                     autoCorrect="off"
-                    spellCheck={authMode === 'login' ? false : undefined}
-                    type={authMode === 'login' ? 'email' : 'text'}
+                    spellCheck={false}
+                    type="email"
                   />
 
                   {authMode === 'register' ? (
                     <WizardInput
-                      label={t('email')}
-                      value={email}
-                      onChange={(event) => setEmail(event.target.value)}
-                      placeholder={t('enterEmail')}
-                      autoCapitalize="none"
+                      label={t('firstName')}
+                      value={firstName}
+                      onChange={(event) => setFirstName(event.target.value)}
+                      placeholder={t('chooseFirstName')}
+                      autoCapitalize="words"
                       autoCorrect="off"
-                      spellCheck={false}
-                      type="email"
                     />
                   ) : null}
 

@@ -17,6 +17,23 @@ struct AppState {
     db: SqlitePool,
 }
 
+fn required_trimmed(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn ensure_password_present(password: &str) -> Result<(), StatusCode> {
+    if password.trim().is_empty() {
+        Err(StatusCode::BAD_REQUEST)
+    } else {
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -48,10 +65,16 @@ async fn main() {
 }
 
 async fn register(State(state): State<AppState>, Json(payload): Json<UserCreate>) -> Result<Json<AuthResponse>, StatusCode> {
-    let hashed = bcrypt::hash(payload.password.unwrap_or_default(), bcrypt::DEFAULT_COST).unwrap();
+    let first_name = required_trimmed(&payload.first_name).ok_or(StatusCode::BAD_REQUEST)?;
+    let email = required_trimmed(&payload.email).ok_or(StatusCode::BAD_REQUEST)?;
+    let last_name = payload.last_name.unwrap_or_default().trim().to_string();
+    ensure_password_present(&payload.password)?;
+
+    let hashed = bcrypt::hash(&payload.password, bcrypt::DEFAULT_COST)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let id = sqlx::query("INSERT INTO users (first_name, email, password, created_at) VALUES (?, ?, ?, ?)")
-        .bind(&payload.first_name)
-        .bind(payload.email.as_deref())
+        .bind(&first_name)
+        .bind(&email)
         .bind(&hashed)
         .bind(Utc::now())
         .execute(&state.db)
@@ -63,9 +86,9 @@ async fn register(State(state): State<AppState>, Json(payload): Json<UserCreate>
         token: "lite_token_no_jwt_verification_needed".to_string(),
         user: UserDTO {
             id,
-            first_name: payload.first_name,
-            last_name: payload.last_name.unwrap_or_default(),
-            email: payload.email,
+            first_name,
+            last_name,
+            email: Some(email),
             created_at: Utc::now(),
             auth_identities: Vec::new(),
         }
@@ -73,13 +96,11 @@ async fn register(State(state): State<AppState>, Json(payload): Json<UserCreate>
 }
 
 async fn login(State(state): State<AppState>, Json(payload): Json<UserLogin>) -> Result<Json<AuthResponse>, StatusCode> {
-    let email = payload.email.trim();
-    if email.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let email = required_trimmed(&payload.email).ok_or(StatusCode::BAD_REQUEST)?;
+    ensure_password_present(&payload.password)?;
 
     let row = sqlx::query("SELECT id, first_name, email, password FROM users WHERE lower(email) = lower(?)")
-        .bind(email)
+        .bind(&email)
         .fetch_optional(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -138,10 +159,18 @@ async fn create_task(State(state): State<AppState>, Json(payload): Json<CreateTa
 
 #[cfg(test)]
 mod tests {
+    use super::{ensure_password_present, required_trimmed};
+
     #[test]
     fn test_bcrypt_logic() {
         let password = "password123";
         let hashed = bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap();
         assert!(bcrypt::verify(password, &hashed).unwrap());
+    }
+
+    #[test]
+    fn rejects_blank_credentials() {
+        assert_eq!(required_trimmed("  "), None);
+        assert!(ensure_password_present(" ").is_err());
     }
 }

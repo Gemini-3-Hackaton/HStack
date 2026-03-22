@@ -18,9 +18,10 @@ interface RemoteAuthResponse {
 interface RemoteAuthRequest {
   baseUrl: string;
   mode: RemoteAuthMode;
+  loginEmail: string;
   firstName: string;
   lastName?: string;
-  email?: string;
+  email: string;
   password: string;
 }
 
@@ -69,6 +70,7 @@ const readErrorMessage = async (response: Response) => {
 export const authenticateRemote = async ({
   baseUrl,
   mode,
+  loginEmail,
   firstName,
   lastName,
   email,
@@ -80,11 +82,11 @@ export const authenticateRemote = async ({
       ? {
           first_name: firstName.trim(),
           last_name: lastName?.trim() || null,
-          email: email?.trim() || null,
+          email: email.trim(),
           password,
         }
       : {
-          email: firstName.trim(),
+          email: loginEmail.trim(),
           password,
         };
 

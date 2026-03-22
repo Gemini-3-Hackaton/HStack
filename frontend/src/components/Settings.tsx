@@ -318,7 +318,8 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
             const authResult = await authenticateRemote({
                 baseUrl,
                 mode: syncAuthMode,
-                firstName: syncAuthMode === 'login' ? syncLoginEmail : syncFirstName,
+                loginEmail: syncLoginEmail,
+                firstName: syncFirstName,
                 lastName: syncLastName,
                 email: syncEmail,
                 password: syncPassword,

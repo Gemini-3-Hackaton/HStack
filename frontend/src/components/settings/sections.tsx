@@ -207,23 +207,23 @@ export const HostingSyncSection = ({
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <EngravedInput
-                  label={syncAuthMode === 'login' ? t('email') : t('firstName')}
-                  value={syncAuthMode === 'login' ? syncLoginEmail : syncFirstName}
+                  label={t('email')}
+                  value={syncAuthMode === 'login' ? syncLoginEmail : syncEmail}
                   onChange={(event: ChangeEvent<HTMLInputElement>) =>
                     syncAuthMode === 'login'
                       ? onSyncLoginEmailChange(event.target.value)
-                      : onSyncFirstNameChange(event.target.value)
+                      : onSyncEmailChange(event.target.value)
                   }
-                  placeholder={syncAuthMode === 'login' ? t('enterEmail') : t('chooseFirstName')}
-                  type={syncAuthMode === 'login' ? 'email' : 'text'}
+                  placeholder={t('enterEmail')}
+                  type="email"
                 />
                 {syncAuthMode === 'register' ? (
                   <EngravedInput
-                    label={t('email')}
-                    value={syncEmail}
-                    onChange={(event: ChangeEvent<HTMLInputElement>) => onSyncEmailChange(event.target.value)}
-                    placeholder={t('enterEmail')}
-                    type="email"
+                    label={t('firstName')}
+                    value={syncFirstName}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) => onSyncFirstNameChange(event.target.value)}
+                    placeholder={t('chooseFirstName')}
+                    type="text"
                   />
                 ) : (
                   <EngravedInput
@@ -264,11 +264,10 @@ export const HostingSyncSection = ({
                 type="button"
                 onClick={onRemoteAuth}
                 disabled={
-                  (syncAuthMode === 'login' ? !syncLoginEmail.trim() : !syncFirstName.trim()) ||
+                  (syncAuthMode === 'login' ? !syncLoginEmail.trim() : !syncEmail.trim() || !syncFirstName.trim()) ||
                   !syncPassword ||
                   !remoteBaseUrl ||
-                  syncPending ||
-                  (syncAuthMode === 'register' && !syncEmail.trim())
+                  syncPending
                 }
                 className="inline-flex items-center justify-center gap-2 rounded-[1rem] bg-[#EFEFEF] px-4 py-3 text-[11px] font-bold uppercase tracking-[0.2em] text-[#080808] transition-all hover:bg-white disabled:cursor-not-allowed disabled:opacity-45"
               >

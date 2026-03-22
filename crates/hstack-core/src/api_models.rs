@@ -10,8 +10,8 @@ use crate::integration::{AuthIdentity, AuthProvider, ConnectionStatus, ExternalR
 pub struct UserCreate {
     pub first_name: String,
     pub last_name: Option<String>,
-    pub email: Option<String>,
-    pub password: Option<String>,
+    pub email: String,
+    pub password: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
