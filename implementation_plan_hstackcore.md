@@ -1,12 +1,11 @@
 # Phase 1: Shared `hstack-core` Crate — LLM Provider Abstraction + Local Ticket Generation
 
-Port the LLM provider switching system from [serving.py](file:///Users/antoine/Documents/production/aimapping/src/compute/models/serving.py) to a Rust crate (`hstack-core`) shared between the Tauri desktop app and the future Axum server. This enables **offline ticket generation** via local LLMs and **user-configurable LLM providers**.
+Port the LLM provider switching system from the legacy `serving.py` implementation to a Rust crate (`hstack-core`) shared between the Tauri desktop app and the future Axum server. This enables **offline ticket generation** via local LLMs and **user-configurable LLM providers**.
 
 ## User Review Required
 
 > [!IMPORTANT]
 > **Workspace restructure**: This proposes converting the repo to a Cargo workspace with `crates/hstack-core` and `crates/hstack-app` (Tauri). The existing `frontend/src-tauri` Cargo project moves to `crates/hstack-app`. The Python server stays untouched for now — it keeps running in parallel until Phase 2 replaces it with Axum.
-
 > [!WARNING]
 > **API key storage**: User-provided API keys will be stored locally on disk (encrypted via Tauri's `tauri-plugin-store`). No keys are ever sent to the HStack server. This is the standard approach for desktop apps, but worth confirming you're comfortable with it.
 
@@ -16,8 +15,10 @@ Port the LLM provider switching system from [serving.py](file:///Users/antoine/D
 
 ### Workspace Root
 
-#### [NEW] [Cargo.toml](file:///Users/antoine/Documents/perso/HStack/Cargo.toml)
+#### [NEW] `Cargo.toml`
+
 Top-level Cargo workspace manifest:
+
 ```toml
 [workspace]
 members = ["crates/hstack-core", "crates/hstack-app"]
@@ -30,17 +31,20 @@ resolver = "2"
 
 The core of this change. A pure Rust library with no Tauri or Axum dependencies — usable from both.
 
-#### [NEW] [Cargo.toml](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/Cargo.toml)
+#### [NEW] `crates/hstack-core/Cargo.toml`
+
 Dependencies: `reqwest`, `serde`/`serde_json`, `tokio`, `thiserror`, `tracing`, `uuid`, `chrono`.
 
-#### [NEW] [src/lib.rs](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/src/lib.rs)
+#### [NEW] `crates/hstack-core/src/lib.rs`
+
 Public modules: `provider`, `chat`, `ticket`, `settings`, `error`.
 
-#### [NEW] [src/provider/mod.rs](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/src/provider/mod.rs)
+#### [NEW] `crates/hstack-core/src/provider/mod.rs`
+
 Core types ported from `primitives.py`:
 
 | Python | Rust |
-|--------|------|
+| --- | --- |
 | `ServingType` enum | `ProviderKind` enum (`OpenAiCompatible`, `Gemini`) |
 | `Serving` model | `ProviderConfig` struct (endpoint, api_key, model_name, kind) |
 | `RateLimitConfig` | `RateLimitConfig` struct (rps, rpm, tpm) — included from Phase 1 for future parallel/batch actions |
@@ -55,13 +59,16 @@ pub enum ProviderKind {
 }
 ```
 
-#### [NEW] [src/provider/openai_compat.rs](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/src/provider/openai_compat.rs)
-Direct port of [_openai.py](file:///Users/antoine/Documents/production/aimapping/src/compute/models/providers/_openai.py) `generate_openai_content` — HTTP POST to `/v1/chat/completions` via `reqwest`. Handles:
+#### [NEW] `crates/hstack-core/src/provider/openai_compat.rs`
+
+Direct port of the legacy `_openai.py` `generate_openai_content` flow — HTTP POST to `/v1/chat/completions` via `reqwest`. Handles:
+
 - Message formatting, tool schemas
 - Response parsing (choices → message → content / tool_calls)
 - Exponential backoff retry (port of `retry_on_fail`)
 
-#### [NEW] [src/provider/gemini.rs](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/src/provider/gemini.rs)
+#### [NEW] `crates/hstack-core/src/provider/gemini.rs`
+
 HTTP POST to `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}`. Gemini uses its own function calling format (`functionCall`/`functionResponse` in `parts`) which differs from OpenAI's `tool_calls` — this module handles the translation.
 
 > [!NOTE]
@@ -69,40 +76,50 @@ HTTP POST to `https://generativelanguage.googleapis.com/v1beta/models/{model}:ge
 
 Ollama is **not** a separate provider — it exposes an OpenAI-compatible endpoint at `http://localhost:11434/v1/chat/completions` and is handled as `ProviderKind::OpenAiCompatible` with no auth headers.
 
-#### [NEW] [src/chat.rs](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/src/chat.rs)
-The tool-calling orchestration loop — port of the `chat_with_gemini()` function from [main.py](file:///Users/antoine/Documents/perso/HStack/hstack/main.py). Takes a user message + provider config + list of tool schemas → runs the generate → extract function calls → execute → return results loop. Returns a `ChatResult` with actions taken + confirmation text.
+#### [NEW] `crates/hstack-core/src/chat.rs`
 
-#### [NEW] [src/ticket.rs](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/src/ticket.rs)
-Ticket types and creation logic. Port of [models.py](file:///Users/antoine/Documents/perso/HStack/hstack/models.py) + the tool dispatch handlers from `main.py`:
+The tool-calling orchestration loop — port of the legacy `chat_with_gemini()` flow. Takes a user message + provider config + list of tool schemas → runs the generate → extract function calls → execute → return results loop. Returns a `ChatResult` with actions taken + confirmation text.
+
+#### [NEW] `crates/hstack-core/src/ticket.rs`
+
+Ticket types and creation logic. Port of the legacy Python ticket models plus the tool dispatch handlers:
+
 - `TicketType` enum (Task, Habit, Event, Commute, Countdown)
 - `TicketStatus` enum (Idle, InFocus, Completed, Expired)
 - `Ticket` struct with payload as `serde_json::Value`
 - Tool schema declarations (equivalent to `ai_tools.py` function schemas)
 
-#### [NEW] [src/provider/rate_limit.rs](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/src/provider/rate_limit.rs)
+#### [NEW] `crates/hstack-core/src/provider/rate_limit.rs`
+
 Port of `RateLimitConfig` + token-bucket rate limiter. Tracks rps/rpm/tpm via atomic counters with sliding window. Used by the dispatch layer to throttle provider calls — essential for batch/parallel tool execution.
 
-#### [NEW] [src/settings.rs](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/src/settings.rs)
+#### [NEW] `crates/hstack-core/src/settings.rs`
+
 User settings types:
+
 - `UserSettings` struct (list of configured providers, default provider ID, local processing preference)
 - `SavedProvider` struct (name, kind, endpoint, model, encrypted API key reference)
 - Serialization to/from JSON for persistence (the storage backend is injected — Tauri uses its store plugin, the server uses a DB)
 
-#### [NEW] [src/error.rs](file:///Users/antoine/Documents/perso/HStack/crates/hstack-core/src/error.rs)
+#### [NEW] `crates/hstack-core/src/error.rs`
+
 Unified error type via `thiserror`.
 
 ---
 
 ### `hstack-app` (Tauri integration)
 
-#### [MODIFY] [Cargo.toml](file:///Users/antoine/Documents/perso/HStack/frontend/src-tauri/Cargo.toml)
+#### [MODIFY] `crates/hstack-app/Cargo.toml`
+
 - Move to `crates/hstack-app/Cargo.toml` (or update path)
 - Add `hstack-core = { path = "../hstack-core" }` dependency
 - Add `tauri-plugin-store` for persisting user settings + API keys
 - Add `tokio` runtime features
 
-#### [MODIFY] [lib.rs](file:///Users/antoine/Documents/perso/HStack/frontend/src-tauri/src/lib.rs)
+#### [MODIFY] `crates/hstack-app/src/lib.rs`
+
 Replace the `greet` scaffold with Tauri commands that expose `hstack-core`:
+
 - `chat_local` — processes a message via the locally-configured LLM provider
 - `get_settings` / `save_settings` — CRUD for provider configuration
 - `list_providers` — returns configured providers
@@ -128,7 +145,7 @@ These tests will use mock HTTP responses (no real API calls). I'll write them al
 
 **Integration smoke test** (run with `cargo test -p hstack-core --features integration`):
 
-8. **Live Ollama test** (gated behind `#[cfg(feature = "integration")]`) — if Ollama is running locally, send a simple prompt and verify we get a response. This test is optional and skipped in CI.
+1. **Live Ollama test** (gated behind `#[cfg(feature = "integration")]`) — if Ollama is running locally, send a simple prompt and verify we get a response. This test is optional and skipped in CI.
 
 ### Manual Verification
 

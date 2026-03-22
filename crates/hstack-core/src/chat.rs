@@ -6,6 +6,7 @@ use crate::provider::{
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
+use tracing::{debug, warn};
 
 pub type ToolExecutor = Box<
     dyn Fn(String, Value) -> Pin<Box<dyn Future<Output = Result<String, Error>> + Send>>
@@ -82,8 +83,7 @@ pub async fn chat_loop(
         // Fallback: If no native tool calls, check if the LLM outputted raw JSON representing a tool call
         if tool_calls.is_empty() {
             if let Some(content) = &response.content {
-                println!("--- NO NATIVE TOOL CALLS. CHECKING FOR FALLBACK JSON ---");
-                println!("RAW ASSISTANT TEXT: {}", content);
+                debug!("no native tool calls returned; checking assistant content for fallback JSON");
                 
                 // Try parsing the entire string as JSON first
                 if let Ok(json_val) = serde_json::from_str::<Value>(content) {
@@ -176,10 +176,10 @@ pub async fn chat_loop(
                             tool_call_id: None,
                             name: None,
                         };
-                        println!("--- SYSTEM CONTEXT REFRESHED AFTER TOOL EXECUTION ---");
+                        debug!("system context refreshed after tool execution");
                     }
                     Err(e) => {
-                        println!("--- WARNING: Failed to refresh system context: {} ---", e);
+                        warn!(error = %e, "failed to refresh system context after tool execution");
                     }
                 }
             }

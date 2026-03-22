@@ -3,14 +3,30 @@
 use hstack_core::api_models::{UserCreate, UserLogin, AuthResponse, UserDTO, CreateTaskPayload};
 use axum::{
     routing::{get, post},
-    extract::{State},
+    extract::{Query, State},
     http::StatusCode,
     Json, Router,
 };
+use serde::Deserialize;
 use sqlx::{SqlitePool, Row};
 use std::net::SocketAddr;
 use chrono::Utc;
 use uuid::Uuid;
+
+#[derive(serde::Serialize)]
+struct TaskDto {
+    id: String,
+    userid: i64,
+    r#type: String,
+    payload: serde_json::Value,
+    status: String,
+    created_at: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TaskQuery {
+    userid: Option<i64>,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -124,8 +140,15 @@ async fn login(State(state): State<AppState>, Json(payload): Json<UserLogin>) ->
     }))
 }
 
-async fn get_tasks(State(state): State<AppState>) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
-    let rows = sqlx::query("SELECT id, userid, type, payload, status, created_at FROM tasks ORDER BY created_at ASC")
+async fn get_tasks(
+    State(state): State<AppState>,
+    Query(query): Query<TaskQuery>,
+) -> Result<Json<Vec<TaskDto>>, StatusCode> {
+    let requested_user_id = query.userid.unwrap_or(1);
+    let rows = sqlx::query(
+        "SELECT id, userid, type, payload, status, created_at FROM tasks WHERE userid = ? ORDER BY created_at ASC",
+    )
+        .bind(requested_user_id)
         .fetch_all(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -133,19 +156,31 @@ async fn get_tasks(State(state): State<AppState>) -> Result<Json<Vec<serde_json:
     let mut tasks = Vec::new();
     for row in rows {
         let payload_str: String = row.get("payload");
-        tasks.push(serde_json::from_str(&payload_str).unwrap_or(serde_json::json!({})));
+        tasks.push(TaskDto {
+            id: row.get("id"),
+            userid: row.get("userid"),
+            r#type: row.get("type"),
+            payload: serde_json::from_str(&payload_str).unwrap_or(serde_json::json!({})),
+            status: row.get("status"),
+            created_at: row.get::<String, _>("created_at"),
+        });
     }
     
     Ok(Json(tasks))
 }
 
-async fn create_task(State(state): State<AppState>, Json(payload): Json<CreateTaskPayload>) -> Result<Json<serde_json::Value>, StatusCode> {
+async fn create_task(
+    State(state): State<AppState>,
+    Query(query): Query<TaskQuery>,
+    Json(payload): Json<CreateTaskPayload>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let id = Uuid::new_v4().to_string();
+    let requested_user_id = query.userid.unwrap_or(1);
     let payload_json = serde_json::to_string(&payload.payload).unwrap_or_default();
     
     sqlx::query("INSERT INTO tasks (id, userid, type, payload, status, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(&id)
-        .bind(1) // Mock user for Lite
+        .bind(requested_user_id)
         .bind(&payload.r#type)
         .bind(&payload_json)
         .bind(&payload.status)
@@ -154,7 +189,7 @@ async fn create_task(State(state): State<AppState>, Json(payload): Json<CreateTa
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(serde_json::json!({ "id": id, "status": "created" })))
+    Ok(Json(serde_json::json!({ "id": id, "userid": requested_user_id, "status": "created" })))
 }
 
 #[cfg(test)]

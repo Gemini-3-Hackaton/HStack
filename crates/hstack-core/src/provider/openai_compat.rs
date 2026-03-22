@@ -1,12 +1,18 @@
 use super::{Message, ProviderConfig, Tool, Role};
 use crate::error::Error;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, enabled, trace, Level};
 
 
 #[derive(Serialize)]
 struct OpenAiMessage<'a> {
     role: &'a str,
-    content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -42,18 +48,28 @@ pub async fn generate_openai_content(
 
     let mut mapped_messages = Vec::new();
     for m in messages {
-        if let Some(ref c) = m.content {
-            mapped_messages.push(OpenAiMessage {
-                role: match m.role {
-                    Role::System => "system",
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                    Role::Tool => "tool",
-                },
-                content: c,
-            });
-        }
+        mapped_messages.push(OpenAiMessage {
+            role: match m.role {
+                Role::System => "system",
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+            },
+            content: m.content.as_deref(),
+            tool_call_id: if m.role == Role::Tool {
+                m.tool_call_id.as_deref()
+            } else {
+                None
+            },
+            name: if m.role == Role::Tool {
+                m.name.as_deref()
+            } else {
+                None
+            },
+        });
     }
+
+    let message_count = mapped_messages.len();
 
     let request = OpenAiChatRequest {
         model: &config.model_name,
@@ -64,21 +80,24 @@ pub async fn generate_openai_content(
     };
 
     let mut headers = reqwest::header::HeaderMap::new();
-    
-    println!("--- SENDING LOCAL LLM REQUEST TO: {} ---", api_url);
-    println!("PAYLOAD: {:?}", serde_json::to_string(&request).unwrap_or_default());
 
-    match reqwest::header::HeaderValue::from_static("application/json") {
-        val => headers.insert("Content-Type", val),
-    };
+    debug!(api_url = %api_url, model = %config.model_name, message_count, has_tools = tools.is_some(), "sending OpenAI-compatible chat request");
+    if enabled!(Level::TRACE) {
+        trace!(request = %serde_json::to_string(&request).unwrap_or_else(|_| "<serialization failed>".to_string()), "OpenAI-compatible request payload");
+    }
 
-    match reqwest::header::HeaderValue::from_static("https://hstack.app") {
-        val => headers.insert("HTTP-Referer", val),
-    };
-    
-    match reqwest::header::HeaderValue::from_static("HStack") {
-        val => headers.insert("X-Title", val),
-    };
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("http-referer"),
+        reqwest::header::HeaderValue::from_static("https://hstack.app"),
+    );
+    headers.insert(
+        reqwest::header::HeaderName::from_static("x-title"),
+        reqwest::header::HeaderValue::from_static("HStack"),
+    );
 
     if !config.api_key.is_empty() {
         let auth_str = if config.api_key.starts_with("Bearer ") {
@@ -88,7 +107,7 @@ pub async fn generate_openai_content(
         };
         match reqwest::header::HeaderValue::from_str(&auth_str) {
             Ok(val) => {
-                headers.insert("Authorization", val);
+                headers.insert(reqwest::header::AUTHORIZATION, val);
             }
             Err(e) => {
                 return Err(Error::Header(format!("Invalid API key format: {}", e)));
@@ -114,8 +133,7 @@ pub async fn generate_openai_content(
             Ok(t) => t,
             Err(_) => "Could not read error body".to_string(),
         };
-        println!("--- HTTP ERROR {} FROM API ---", status);
-        println!("BODY: {}", body);
+        debug!(status, body = %body, "OpenAI-compatible API returned an error response");
         return Err(Error::Provider(format!("API error (status {}): {}", status, body)));
     }
 
@@ -123,7 +141,7 @@ pub async fn generate_openai_content(
     let response_data = match response_data_result {
         Ok(data) => data,
         Err(e) => {
-            let _ = std::fs::OpenOptions::new().create(true).append(true).open("hstack_debug.log").map(|mut f| std::io::Write::write_fmt(&mut f, format_args!("JSON Error: {}\\n", e)));
+            debug!(error = %e, "failed to parse OpenAI-compatible response body");
             return Err(Error::Internal(format!("Failed to parse response: {}", e)));
         }
     };
@@ -134,6 +152,8 @@ pub async fn generate_openai_content(
     }
 
     let msg = choices.remove(0).message;
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open("hstack_debug.log").map(|mut f| std::io::Write::write_fmt(&mut f, format_args!("LLM RAW MESSAGE: {:?}\\n", msg)));
+    if enabled!(Level::TRACE) {
+        trace!(message = ?msg, "received OpenAI-compatible response message");
+    }
     Ok(msg)
 }

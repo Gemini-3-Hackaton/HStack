@@ -3,25 +3,6 @@
 version = 4
 
 [[package]]
-name = "HStack"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hstack-core",
- "keyring",
- "regex",
- "rrule",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tauri-plugin-store",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1816,6 +1797,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc627f471c528ff0c4a49e1d5e60450c8f6461dd6d10ba9dcd3a61d3dff7728d"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "hstack-app"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hstack-core",
+ "keyring",
+ "regex",
+ "rrule",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tauri-plugin-store",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

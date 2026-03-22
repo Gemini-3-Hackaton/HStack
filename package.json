@@ -23,7 +23,7 @@
     "url": "git+https://github.com/HStack-Org/HStack.git"
   },
   "keywords": [],
-  "author": "",
+  "author": "Antoine Demangeon",
   "license": "GPL-3.0-only",
   "type": "commonjs",
   "bugs": {

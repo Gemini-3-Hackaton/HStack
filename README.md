@@ -1,29 +1,28 @@
 
 # HStack : First step toward symbiosis
 
-
 **The auto-kanban for normal people who want to think about less things.**
 
-HStack is an AI-native task management system powered by Google Gemini. You talk to it in plain language — it organizes your life into a visual stack of tickets, tracks your commutes in real time, and monitors your background agent work with countdown timers.
+HStack is an AI-native task management system with configurable LLM providers. You talk to it in plain language — it organizes your life into a visual stack of tickets, tracks your commutes in real time, and monitors your background agent work with countdown timers.
 
 No forms. No dropdowns. Just tell it what's going on.
 
 ![alt text](docs/assets/image.png)
----
 
 ## Core Concept
 
-HStack replaces traditional task boards with a single conversational interface. Every action — creating tasks, scheduling commutes, checking directions — flows through a natural language chat backed by Gemini function calling. The AI decomposes complex requests into discrete tool calls automatically.
+HStack replaces traditional task boards with a single conversational interface. Every action — creating tasks, scheduling commutes, checking directions — flows through a natural language chat backed by provider-agnostic tool calling. The AI decomposes complex requests into discrete tool calls automatically.
 
 ---
 
 ## Features
 
 ### Ticket Management
+
 Talk to the AI to create, edit, delete, and complete tickets. Each ticket is auto-classified:
 
 | Type | Purpose | Example |
-|------|---------|---------|
+| --- | --- | --- |
 | **TASK** | One-off action items | *"Buy groceries"* |
 | **HABIT** | Daily routines and recurring behaviors | *"Exercise every morning"* |
 | **EVENT** | Time-specific appointments | *"Dentist at 3pm tomorrow"* |
@@ -33,6 +32,7 @@ Talk to the AI to create, edit, delete, and complete tickets. Each ticket is aut
 The AI handles multi-action decomposition — a message like *"Get laundry detergent for mum and kibble for the cat"* becomes multiple discrete tickets in one turn.
 
 ### Commute Management
+
 Describe a recurring trip and HStack registers it as a commute:
 
 - **Automatic alerts** — 30 minutes before your deadline, the system starts polling Google Maps Directions every 5 minutes
@@ -41,6 +41,7 @@ Describe a recurring trip and HStack registers it as a commute:
 - **Background scheduler** — an asyncio loop checks all commutes every 60 seconds, no user action needed
 
 ### Live / Urgent Directions
+
 For one-time urgent trips (*"I need to get to the airport in 45 minutes"*):
 
 - Immediate directions response with transit options
@@ -49,6 +50,7 @@ For one-time urgent trips (*"I need to get to the airport in 45 minutes"*):
 - Auto-cleanup when the deadline passes
 
 ### Agent Task Timers
+
 When an AI agent or IDE is working on something in the background:
 
 - Creates a ticket with a live **MM:SS countdown timer**
@@ -58,6 +60,7 @@ When an AI agent or IDE is working on something in the background:
 - Triggered by natural phrases: *"Cursor is fixing the tests"*, *"Copilot is generating the migration"*
 
 ### Notification System
+
 - **Single notification policy** — only one alert banner visible at a time; new alerts replace the previous one
 - **Persistent banners** — active commute/live-trip alerts stay on screen until replaced by the next update
 - **Expired alerts** auto-dismiss after 10 seconds
@@ -69,7 +72,7 @@ When an AI agent or IDE is working on something in the background:
 
 HStack uses a **local-first, shared-core** architecture to ensure maximum performance, privacy, and reliability across platforms.
 
-```
+```text
 ┌─────────────────────────────────────────────────┐
 │                Frontend (Tauri)                 │
 │      React · Framer Motion · Tailwind CSS       │
@@ -91,7 +94,7 @@ HStack uses a **local-first, shared-core** architecture to ensure maximum perfor
 ```
 
 | Component | Tech | Role |
-|-----------|------|------|
+| --- | --- | --- |
 | **Core** | Rust (`hstack-core`) | Shared business logic, LLM providers (Gemini/OpenAI), deterministic sync hashing |
 | **App** | Tauri (`hstack-app`) | Native desktop shell, OS Keychain integration (Security), local state projection |
 | **Frontend** | React, Vite, Lucide | Interaction UI, ticket visualization, WebGL aesthetics |
@@ -103,6 +106,7 @@ HStack uses a **local-first, shared-core** architecture to ensure maximum perfor
 ## Getting Started
 
 ### Prerequisites
+
 - [Rust](https://www.rust-lang.org/tools/install) (latest stable)
 - [Node.js](https://nodejs.org/) & `npm`
 - [Tauri Dependencies](https://tauri.app/v1/guides/getting-started/prerequisites) (OS specific)
@@ -140,6 +144,7 @@ This helper derives the settings location from the Tauri app identifier and supp
 ### Security Configuration
 
 HStack stores your API keys in your system's **Hardware-Encrypted Keychain**. To configure:
+
 1. Open the app.
 2. Click the **Settings Gear** in the top-right.
 3. Add a new LLM provider (Google Gemini or OpenAI-compatible like Ollama).
@@ -149,16 +154,14 @@ HStack stores your API keys in your system's **Hardware-Encrypted Keychain**. To
 
 ## API Endpoints
 
+The public repo currently ships a lightweight auth/tasks server in `crates/hstack-server-lite`. The desktop app can also run fully local flows through Tauri commands without using these HTTP endpoints.
+
 | Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | Serve the frontend |
-| `GET` | `/api/tasks?userid=N` | Fetch all tickets for a user |
-| `POST` | `/api/chat` | Send a message to Gemini (creates/edits/deletes tickets) |
+| --- | --- | --- |
+| `GET` | `/api/tasks?userid=N` | Fetch structured task objects for a user from the lite server |
+| `POST` | `/api/tasks?userid=N` | Create a task for a user in the lite server |
 | `POST` | `/api/auth/register` | Create a new user account |
 | `POST` | `/api/auth/login` | Authenticate an existing user |
-| `GET` | `/api/commute-alerts/{userid}` | Poll for pending commute/live-trip alerts |
-| `GET` | `/api/commutes/{userid}` | List registered recurring commutes |
-| `GET` | `/api/live-trips/{userid}` | List active live/urgent trips |
 
 ---
 
@@ -167,7 +170,7 @@ HStack stores your API keys in your system's **Hardware-Encrypted Keychain**. To
 Gemini has access to these function-calling tools:
 
 | Tool | Action |
-|------|--------|
+| --- | --- |
 | `create_ticket` | Create a TASK, HABIT, or EVENT |
 | `edit_ticket` | Modify an existing ticket's title or type |
 | `delete_ticket` | Remove a specific ticket by ID |
@@ -184,22 +187,16 @@ The AI can invoke **multiple tools in a single turn** to decompose complex reque
 
 ## Project Structure
 
-```
+```text
 HStack/
-├── main.py                  # FastAPI app, chat endpoint, all tool handlers
-├── ai_tools.py              # Gemini client, tool schemas, directions helpers
-├── commute_scheduler.py     # Background scheduler for commutes & live trips
-├── models.py                # Pydantic models, TicketType enum
-├── database.py              # asyncpg database operations
-├── pyproject.toml           # Project config & dependencies
-├── requirements.txt         # Pip-compatible dependencies
-├── services/
-│   └── directions/
-│       └── main.py          # Google Maps Directions microservice
-└── static/
-    ├── index.html           # Frontend HTML
-    ├── app.js               # Frontend logic, polling, alerts
-    └── style.css            # Dark theme, ticket styles, animations
+├── crates/
+│   ├── hstack-app/          # Tauri desktop shell and native commands
+│   ├── hstack-core/         # Shared contracts, LLM/provider logic, sync projection
+│   └── hstack-server-lite/  # Public minimal auth/tasks HTTP server
+├── frontend/                # React/Vite frontend rendered inside Tauri
+├── docs/                    # Licensing and public/private boundary docs
+├── scripts/                 # Development helpers
+└── tests/                   # Remaining repo-level tests
 ```
 
 ---
@@ -209,11 +206,13 @@ HStack/
 HStack is building toward a world where your task board is a living, breathing system that understands context, not just input.
 
 **Where we are:**
+
 - Natural language ticket management with AI decomposition
 - Real-time transit awareness baked into daily planning
 - Background agent monitoring as a first-class task type
 
 **Where we're going:**
+
 - **Contextual auto-scheduling** — the system learns your patterns and pre-populates your day before you wake up
 - **Cross-agent orchestration** — HStack becomes the central hub that dispatches work to Cursor, Copilot, Claude, and other agents, tracking all of them with live timers
 - **Predictive commute intelligence** — instead of polling on a schedule, the system anticipates delays and proactively reroutes you
