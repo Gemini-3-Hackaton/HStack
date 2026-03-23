@@ -1,224 +1,328 @@
+# HStack
 
-# HStack : First step toward symbiosis
+<p align="center">
+  <strong>The AI-native stack for people who want to think about less stuff.</strong>
+</p>
 
+<p align="center">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white" />
+  <img alt="Tauri" src="https://img.shields.io/badge/Tauri-24C8DB?style=for-the-badge&logo=tauri&logoColor=white" />
+  <img alt="React" src="https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB" />
+  <img alt="Vite" src="https://img.shields.io/badge/Vite-646CFF?style=for-the-badge&logo=vite&logoColor=white" />
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white" />
+  <img alt="Axum" src="https://img.shields.io/badge/Axum-0F172A?style=for-the-badge&logo=rust&logoColor=white" />
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white" />
+  <img alt="Android" src="https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white" />
+</p>
 
-**The auto-kanban for normal people who want to think about less things.**
+<p align="center">
+  HStack turns plain-language intent into a living stack of tickets, commutes, schedules, and background agent work.<br />
+  No forms. No board micromanagement. Just tell it what is happening.
+</p>
 
-HStack is an AI-native task management system powered by Google Gemini. You talk to it in plain language — it organizes your life into a visual stack of tickets, tracks your commutes in real time, and monitors your background agent work with countdown timers.
+> [!WARNING]
+> HStack is currently in alpha and under active development. Features, data models, UI behavior, and setup flows can change significantly between revisions.
 
-No forms. No dropdowns. Just tell it what's going on.
+<p align="center">
+  <img src="docs/assets/preview.png" alt="HStack mobile app preview" width="420" />
+</p>
 
-![alt text](image.png)
----
+<p align="center">
+  Current HStack interface preview on macOS. The mobile build uses the same visual design.
+</p>
 
-## Core Concept
+## What HStack Is
 
-HStack replaces traditional task boards with a single conversational interface. Every action — creating tasks, scheduling commutes, checking directions — flows through a natural language chat backed by Gemini function calling. The AI decomposes complex requests into discrete tool calls automatically.
+HStack is a local-first task system built around conversation instead of manual ticket entry.
 
----
+You speak naturally. The app decomposes that request into structured tickets, keeps time-aware items grouped into a visual timeline, tracks commute timing, and supports countdown tickets for time-bound work.
 
-## Features
+The core idea is simple:
 
-### Ticket Management
-Talk to the AI to create, edit, delete, and complete tickets. Each ticket is auto-classified:
+- natural language in
+- structured ticket state out
+- AI-assisted planning without turning the product into a spreadsheet
+
+## Why It Feels Different
+
+Traditional task tools make you translate your life into fields, labels, boards, and recurring-rule builders.
+
+HStack flips that:
+
+- you say what you need
+- the model chooses the right tool calls
+- the app projects the result into a focused visual stack
+
+That makes it good at the things normal task apps usually make annoying:
+
+- splitting one messy sentence into multiple tickets
+- turning a real appointment into a proper scheduled event
+- generating commute tickets that stay tied to arrival time
+- tracking time-bound work with countdown tickets instead of burying it in notes
+
+## Implemented Today
+
+These are already present in the public product today.
+
+| Capability | What it does |
+| --- | --- |
+| Conversational ticketing | Create, edit, complete, and delete tickets from plain language |
+| Timeline projection | Automatically groups scheduled tickets into a day/week stack |
+| Commute awareness | Creates commute tickets with transit-first routing and alert windows |
+| Live urgent directions | Keeps refreshing short-lived travel guidance until the deadline expires |
+| Countdown tickets | Tracks time-bound work with live countdown UI and expiry behavior |
+| Local-first sync model | Projects state from durable base state plus pending actions |
+| Secure provider storage | Stores LLM API keys in the system keychain rather than plaintext files |
+
+## Still To Build
+
+These belong to the public roadmap and are not being presented as finished product behavior.
+
+| Roadmap area | What is left to implement |
+| --- | --- |
+| Planner hardening | More transcript-based regression coverage, stronger dependency-aware planning, stricter planner validation |
+| Shared scheduling evolution | Continue reducing duplicated scheduling logic while keeping type-specific semantics explicit |
+| Richer ticket rendering | Push type-specific layouts further so each ticket class exposes more structured context intentionally |
+| Minimal map experience | Extend commute UX carefully beyond external map links without jumping straight to embedded maps |
+| Ticket status and priority | Add optional cross-type status and priority fields with UI support |
+| Proactive planning | Move from reactive ticket creation toward more proactive schedule assistance |
+| Cross-agent orchestration | Better visibility and coordination across external agents and IDE-driven work |
+| Multi-user coordination | Shared stacks and coordination flows across people are still ahead |
+
+For the tracked public roadmap, see [ROADMAP.md](ROADMAP.md).
+
+## Ticket Types
+
+Every created item lands in a typed model instead of becoming an unstructured chat log.
 
 | Type | Purpose | Example |
-|------|---------|---------|
-| **TASK** | One-off action items | *"Buy groceries"* |
-| **HABIT** | Daily routines and recurring behaviors | *"Exercise every morning"* |
-| **EVENT** | Time-specific appointments | *"Dentist at 3pm tomorrow"* |
-| **COMMUTE** | Recurring transit routes with live alerts | *"I go from Asnières to Saint-Lazare every morning at 9:30"* |
-| **AGENT_TASK** | Background AI/IDE work with countdown timer | *"VSCode is refactoring my auth module"* |
+| --- | --- | --- |
+| `TASK` | One-off action item | `Buy groceries` |
+| `HABIT` | Repeatable routine | `Exercise every morning` |
+| `EVENT` | Time-specific commitment | `Dentist at 3pm tomorrow` |
+| `COMMUTE` | Scheduled trip with routing context | `I go from Asnieres to Saint-Lazare every morning at 9:30` |
+| `COUNTDOWN` | Time-bound item with countdown behavior | `Finish this in 10 minutes` |
 
-The AI handles multi-action decomposition — a message like *"Get laundry detergent for mum and kibble for the cat"* becomes multiple discrete tickets in one turn.
+One useful property of the tool system is multi-action decomposition. A message like `Get laundry detergent for mum and kibble for the cat` can become multiple distinct tickets in a single turn.
+
+## Implemented Feature Detail
+
+### Conversational Ticket Management
+
+- Create, edit, delete, and complete tickets through chat
+- Project mixed ticket types into one continuous stack
+- Keep structured scheduling data instead of loose notes
+- Preserve typed ticket payloads across app and sync boundaries
 
 ### Commute Management
-Describe a recurring trip and HStack registers it as a commute:
 
-- **Automatic alerts** — 30 minutes before your deadline, the system starts polling Google Maps Directions every 5 minutes
-- **Transit-first** — shows departure times, line names, and walk segments for public transit routes
-- **Day scheduling** — specify which days (defaults to weekdays) and arrival time in HH:MM
-- **Background scheduler** — an asyncio loop checks all commutes every 60 seconds, no user action needed
+- Register recurring trips with arrival-time semantics
+- Poll routing providers when a deadline window is active
+- Show transit-first route details such as departures, lines, and walk segments
+- Keep commute tickets related to the events they support
 
-### Live / Urgent Directions
-For one-time urgent trips (*"I need to get to the airport in 45 minutes"*):
+### Live Directions
 
-- Immediate directions response with transit options
-- Automatic re-polling every 5 minutes until the deadline expires
-- Persistent banner notifications with a pulsing **LIVE** badge
-- Auto-cleanup when the deadline passes
+- Handle urgent one-off travel requests
+- Refresh directions repeatedly until the trip deadline expires
+- Surface active travel state through persistent alerts
+- Clean up expired travel sessions automatically
 
-### Agent Task Timers
-When an AI agent or IDE is working on something in the background:
+### Countdown Tickets
 
-- Creates a ticket with a live **MM:SS countdown timer**
-- Default duration: 10 minutes (customizable)
-- Auto-deletes from the database when the timer expires
-- Visual pulsing amber indicator on the ticket card
-- Triggered by natural phrases: *"Cursor is fixing the tests"*, *"Copilot is generating the migration"*
+- Create tickets for time-bound work
+- Run with live countdown behavior
+- Auto-expire when the work window closes
+- Keep deadlines and short-lived work visible in the same planning surface
 
-### Notification System
-- **Single notification policy** — only one alert banner visible at a time; new alerts replace the previous one
-- **Persistent banners** — active commute/live-trip alerts stay on screen until replaced by the next update
-- **Expired alerts** auto-dismiss after 10 seconds
-- **Reset clears everything** — clearing the stack also cancels all schedulers, live trips, and alert banners
+### Notifications
 
----
+- Only one alert banner is shown at a time
+- New alerts replace older ones instead of stacking noisy toasts
+- Expired alerts dismiss automatically
+- Clearing the stack also clears runtime alert state
 
 ## Architecture
 
-```
+HStack is organized as a shared-core, local-first system.
+
+```text
 ┌─────────────────────────────────────────────────┐
-│                  Frontend                        │
-│         Vanilla JS · WebGL Shaders · CSS         │
-│    Chat → /api/chat    Polls → /api/commute-alerts│
+│                Frontend (Tauri)                 │
+│      React · Vite · Tailwind CSS · Lucide       │
+│    Renders state and invokes native commands    │
 └───────────────┬─────────────────┬───────────────┘
                 │                 │
         ┌───────▼───────┐  ┌─────▼──────────────┐
-        │  FastAPI :8080 │  │ Commute Scheduler  │
-        │   main.py      │  │ (asyncio background)│
-        │   Gemini AI    │  │ commute_scheduler.py│
+        │  hstack-app   │  │   hstack-core      │
+        │ Tauri / Rust  │  │ Shared contracts   │
+        │ Local state   │  │ Provider logic     │
+        │ Sync runtime  │  │ Sync projection    │
         └───────┬───────┘  └─────┬──────────────┘
                 │                 │
         ┌───────▼─────────────────▼───────┐
-        │       Directions Service :8001   │
-        │   Google Maps Directions API     │
-        │   services/directions/main.py    │
+        │         System Keychain         │
+        │ Hardware-backed provider secrets│
         └─────────────────────────────────┘
-                │
-        ┌───────▼───────┐
-        │  PostgreSQL    │
-        │  (Supabase)    │
-        └───────────────┘
 ```
 
 | Component | Tech | Role |
-|-----------|------|------|
-| **Backend** | FastAPI, Python 3.11+ | API server, AI orchestration, tool dispatch |
-| **AI** | Google Gemini (`gemini-flash-latest`) | Natural language → function calls |
-| **Directions** | Google Maps API via `googlemaps` | Transit routing microservice |
-| **Database** | PostgreSQL (Supabase) via `asyncpg` | Persistent task/user storage |
-| **Scheduler** | asyncio background task | Periodic commute checks, live trip polling |
-| **Frontend** | Vanilla JS, WebGL, CSS | Chat UI, ticket cards, alert banners |
+| --- | --- | --- |
+| `hstack-core` | Rust | Shared business logic, contracts, provider integrations, sync projection |
+| `hstack-app` | Tauri + Rust | Native shell, secure storage, sync transport, local persistence |
+| `frontend` | React + Vite | Visual stack, onboarding, chat UI, settings, mobile/desktop rendering |
+| `hstack-server-lite` | Rust + Axum | Public lightweight auth and ticket backend |
 
----
+## Local-First Model
+
+The app is designed so the browser UI does not own canonical sync state.
+
+Instead, the Tauri Rust layer keeps durable state in local stores and projects the visible stack from:
+
+- base state
+- pending actions
+
+That gives the product a few important properties:
+
+- better offline tolerance
+- deterministic state projection
+- less browser-only shadow state
+- safer sync ownership boundaries
 
 ## Getting Started
 
 ### Prerequisites
-- Python 3.11+
-- [`uv`](https://docs.astral.sh/uv/) package manager
-- A PostgreSQL database (Supabase recommended)
-- Google Gemini API key
-- Google Maps API key (with Directions API enabled)
 
-### Environment Variables
+- [Rust](https://www.rust-lang.org/tools/install)
+- [Node.js](https://nodejs.org/) and `npm`
+- [Tauri prerequisites](https://tauri.app/start/prerequisites/)
 
-Create a `.env` file at the project root:
+### Install Dependencies
 
-```env
-DATABASE_URL=postgresql://...
-GEMINI_API_KEY=your_gemini_key
-GOOGLE_MAPS_API_KEY=your_google_maps_key
-DIRECTIONS_SERVICE_URL=http://localhost:8001   # optional, this is the default
-```
-
-### Running
-
-**1. Start the Directions microservice:**
+From the repo root:
 
 ```bash
-cd services/directions
-uv run uvicorn main:app --port 8001 --reload
+npm install
+npm install --prefix frontend
 ```
 
-> Important: start this from the `services/directions/` directory so it loads the correct `main.py`.
-
-**2. Start the main application:**
+### Run The Desktop App
 
 ```bash
-cd /path/to/HStack
-uv run uvicorn main:app --port 8080 --reload
+npm run dev
 ```
 
-**3. Open the app:**
+The first run compiles the Rust side and can take a while. Iteration after that is much faster.
 
-Navigate to [http://127.0.0.1:8080](http://127.0.0.1:8080).
+### Reset The Welcome Flow During Development
 
----
+```bash
+npm run reset:welcome
+```
 
-## API Endpoints
+That helper removes the derived app settings file without hardcoding a machine-specific path.
+
+## Android
+
+The Android packaging flow for this repo is documented in:
+
+- [docs/android-build.md](docs/android-build.md)
+
+For the normal device loop, use the repo script:
+
+```bash
+npm run android:reinstall
+```
+
+That script handles build, signing, reinstall, and app launch through `adb`.
+
+## Security And Provider Configuration
+
+HStack stores provider secrets in the system keychain rather than writing API keys to plaintext project config.
+
+To configure a provider:
+
+1. Open the app.
+2. Open settings.
+3. Add a provider such as Gemini or an OpenAI-compatible endpoint.
+4. Paste the API key.
+
+The key is stored through native secure storage.
+
+## Public API Surface
+
+This public repo ships a lightweight HTTP server in `crates/hstack-server-lite`. The desktop app can also run local flows without depending on those HTTP routes.
 
 | Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/` | Serve the frontend |
-| `GET` | `/api/tasks?userid=N` | Fetch all tickets for a user |
-| `POST` | `/api/chat` | Send a message to Gemini (creates/edits/deletes tickets) |
-| `POST` | `/api/auth/register` | Create a new user account |
+| --- | --- | --- |
+| `GET` | `/api/tickets?userid=N` | Fetch structured tickets for a user |
+| `POST` | `/api/tickets?userid=N` | Create a ticket for a user |
+| `POST` | `/api/auth/register` | Create a user account |
 | `POST` | `/api/auth/login` | Authenticate an existing user |
-| `GET` | `/api/commute-alerts/{userid}` | Poll for pending commute/live-trip alerts |
-| `GET` | `/api/commutes/{userid}` | List registered recurring commutes |
-| `GET` | `/api/live-trips/{userid}` | List active live/urgent trips |
 
----
+## AI Tooling Model
 
-## AI Tool System
-
-Gemini has access to these function-calling tools:
+The model operates through typed tools rather than freeform guessing.
 
 | Tool | Action |
-|------|--------|
-| `create_ticket` | Create a TASK, HABIT, or EVENT |
-| `edit_ticket` | Modify an existing ticket's title or type |
-| `delete_ticket` | Remove a specific ticket by ID |
-| `delete_all_tickets` | Clear the entire stack |
-| `add_commute` | Register a recurring commute with schedule |
-| `remove_commute` | Delete a registered commute |
-| `get_directions` | One-shot transit directions between two points |
-| `start_live_directions` | Begin live tracking for an urgent trip |
-| `create_agent_task` | Start a timed background agent task |
+| --- | --- |
+| `create_ticket` | Create a `TASK`, `HABIT`, or `EVENT` |
+| `edit_ticket` | Modify an existing ticket |
+| `delete_ticket` | Remove one ticket by ID |
+| `delete_all_tickets` | Clear the stack |
+| `add_commute` | Register a recurring commute |
+| `remove_commute` | Delete a commute |
+| `get_directions` | Fetch one-shot directions |
+| `start_live_directions` | Start live refresh for an urgent trip |
+| `create_countdown` | Start a timed countdown ticket |
 
-The AI can invoke **multiple tools in a single turn** to decompose complex requests.
-
----
+This is what lets HStack turn one messy sentence into multiple concrete state changes.
 
 ## Project Structure
 
-```
+```text
 HStack/
-├── main.py                  # FastAPI app, chat endpoint, all tool handlers
-├── ai_tools.py              # Gemini client, tool schemas, directions helpers
-├── commute_scheduler.py     # Background scheduler for commutes & live trips
-├── models.py                # Pydantic models, TicketType enum
-├── database.py              # asyncpg database operations
-├── pyproject.toml           # Project config & dependencies
-├── requirements.txt         # Pip-compatible dependencies
-├── services/
-│   └── directions/
-│       └── main.py          # Google Maps Directions microservice
-└── static/
-    ├── index.html           # Frontend HTML
-    ├── app.js               # Frontend logic, polling, alerts
-    └── style.css            # Dark theme, ticket styles, animations
+├── crates/
+│   ├── hstack-app/          # Tauri shell and native commands
+│   ├── hstack-core/         # Shared contracts and logic
+│   └── hstack-server-lite/  # Public minimal backend
+├── frontend/                # React/Vite UI rendered inside Tauri
+├── docs/                    # Build, licensing, and boundary docs
+├── scripts/                 # Development helpers
+└── tests/                   # Repo-level tests
 ```
 
----
+## Product Direction
 
-## Vision
+HStack is aiming for a planning surface that feels less like project management software and more like ambient operational memory.
 
-HStack is building toward a world where your task board is a living, breathing system that understands context, not just input.
+Already implemented:
 
-**Where we are:**
-- Natural language ticket management with AI decomposition
-- Real-time transit awareness baked into daily planning
-- Background agent monitoring as a first-class task type
+- natural language ticket management
+- timeline-aware planning
+- commute-aware scheduling
+- visible background agent work
 
-**Where we're going:**
-- **Contextual auto-scheduling** — the system learns your patterns and pre-populates your day before you wake up
-- **Cross-agent orchestration** — HStack becomes the central hub that dispatches work to Cursor, Copilot, Claude, and other agents, tracking all of them with live timers
-- **Predictive commute intelligence** — instead of polling on a schedule, the system anticipates delays and proactively reroutes you
-- **Ambient awareness** — calendar, weather, traffic, and energy levels feed into ticket prioritization automatically
-- **Multi-user coordination** — shared stacks where teams see each other's context without status meetings
-- **Voice-first interface** — talk to HStack while walking, driving, or cooking — no screen required
+Still to implement:
 
-The end state: a system that thinks about your day so you don't have to.
+- more proactive scheduling
+- stronger cross-agent orchestration
+- smarter commute prediction
+- richer context-aware prioritization
+- coordinated multi-user stacks
+
+The end goal is not a prettier board. It is a system that removes planning friction from ordinary life.
+
+## License
+
+This public repository uses a split-license model:
+
+- Product code is licensed under GPL-3.0-only.
+- `crates/hstack-core` is licensed under MPL-2.0.
+
+That matches the project boundary:
+
+- the public app and lite server remain strongly open when redistributed
+- the shared contract layer stays reusable across the public/private split without forcing the same copyleft scope everywhere
+
+See [docs/licensing.md](docs/licensing.md) and [docs/public-private-contract.md](docs/public-private-contract.md) for the rationale.
