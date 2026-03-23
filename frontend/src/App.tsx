@@ -1,11 +1,13 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { SyncProvider, TicketModel } from "./SyncEngine";
 import { useSync } from "./useSync";
-import { Send, ChevronDown, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
+import { Send, ChevronDown, Plus, Wifi, WifiOff, Settings as SettingsIcon, ChevronRight, ChevronUp, ExternalLink, Mic, Square } from "lucide-react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { AnimatedWebGLGrain } from "./components/AnimatedWebGLGrain";
 import { WebGLGrain } from "./components/WebGLGrain";
 import { motion, AnimatePresence } from "framer-motion";
 import { Settings } from "./components/Settings";
@@ -26,6 +28,8 @@ import {
   resolveStructuredLocation,
 } from "./ticketPresentation";
 import { canUseDesktopWindowControls, minimizeDesktopWindow, startDesktopWindowDrag } from "./platform";
+import { buildApiUrl, resolveRemoteSyncConfig, type SyncSessionInfo, type UserSettingsShape } from "./syncConfig";
+import type { UserSettings, VoiceCapabilityResponse, VoiceSecretStatus } from "./components/settings/types";
 
 const TASK_TYPE_LABELS = {
   TASK: 'taskTypeTask',
@@ -76,11 +80,210 @@ const INTERACTION_THEMES = {
   ERROR: makeTheme(BASE_COLORS.ERROR)
 };
 
+const COMPOSER_PROCESSING_THEME = {
+  c1: [44, 46, 52] as [number, number, number],
+  c2: [29, 32, 38] as [number, number, number],
+  c3: [20, 22, 27] as [number, number, number],
+  c4: [11, 12, 15] as [number, number, number],
+};
+
+const COMPOSER_PROCESSING_THEME_COOL = {
+  c1: [68, 72, 86] as [number, number, number],
+  c2: [42, 46, 58] as [number, number, number],
+  c3: [26, 30, 39] as [number, number, number],
+  c4: [10, 11, 14] as [number, number, number],
+};
+
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content?: string;
   name?: string;
 }
+
+interface VoiceEventPayload {
+  type: 'started' | 'ready' | 'partial' | 'done' | 'error' | 'stopped';
+  text?: string;
+  message?: string;
+  selected_mode?: string;
+}
+
+const VOICE_EVENT = 'hstack:voice-event';
+
+const floatTo16BitPcm = (input: Float32Array) => {
+  const output = new Int16Array(input.length);
+
+  for (let index = 0; index < input.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, input[index] ?? 0));
+    output[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+
+  return new Uint8Array(output.buffer);
+};
+
+const downsampleBuffer = (buffer: Float32Array, inputSampleRate: number, outputSampleRate: number) => {
+  if (inputSampleRate === outputSampleRate) {
+    return buffer;
+  }
+
+  if (outputSampleRate > inputSampleRate) {
+    throw new Error('Output sample rate must not exceed input sample rate');
+  }
+
+  const sampleRateRatio = inputSampleRate / outputSampleRate;
+  const newLength = Math.round(buffer.length / sampleRateRatio);
+  const result = new Float32Array(newLength);
+
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+    let accumulated = 0;
+    let count = 0;
+
+    for (let index = offsetBuffer; index < nextOffsetBuffer && index < buffer.length; index += 1) {
+      accumulated += buffer[index] ?? 0;
+      count += 1;
+    }
+
+    result[offsetResult] = count > 0 ? accumulated / count : 0;
+    offsetResult += 1;
+    offsetBuffer = nextOffsetBuffer;
+  }
+
+  return result;
+};
+
+const uint8ArrayToBase64 = (bytes: Uint8Array) => {
+  let binary = '';
+  const chunkSize = 0x8000;
+
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+
+  return btoa(binary);
+};
+
+const composeVoiceDraft = (prefix: string, transcript: string) => {
+  const trimmedTranscript = transcript.trimStart();
+  if (!trimmedTranscript) {
+    return prefix;
+  }
+
+  if (!prefix.trim()) {
+    return trimmedTranscript;
+  }
+
+  return /\s$/.test(prefix) ? `${prefix}${trimmedTranscript}` : `${prefix} ${trimmedTranscript}`;
+};
+
+const findTranscriptOverlap = (existingText: string, incomingText: string) => {
+  const maxOverlap = Math.min(existingText.length, incomingText.length);
+
+  for (let length = maxOverlap; length > 0; length -= 1) {
+    if (existingText.slice(-length) === incomingText.slice(0, length)) {
+      return length;
+    }
+  }
+
+  return 0;
+};
+
+const mergeVoiceTranscript = (existingText: string, incomingText: string) => {
+  if (!existingText) {
+    return incomingText;
+  }
+
+  if (!incomingText) {
+    return existingText;
+  }
+
+  if (incomingText.startsWith(existingText) || incomingText.includes(existingText)) {
+    return incomingText;
+  }
+
+  if (existingText.startsWith(incomingText) || existingText.includes(incomingText)) {
+    return existingText;
+  }
+
+  if (existingText.trim().length <= 3) {
+    return incomingText;
+  }
+
+  const overlap = findTranscriptOverlap(existingText, incomingText);
+  if (overlap > 0) {
+    return `${existingText}${incomingText.slice(overlap)}`;
+  }
+
+  return `${existingText}${incomingText}`;
+};
+
+const buildVoiceAudioConstraints = (): MediaStreamConstraints => ({
+  audio: {
+    channelCount: 1,
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  },
+});
+
+const requestMicrophoneStream = async (): Promise<MediaStream> => {
+  const constraints = buildVoiceAudioConstraints();
+
+  if (navigator.mediaDevices?.getUserMedia) {
+    return navigator.mediaDevices.getUserMedia(constraints);
+  }
+
+  const legacyNavigator = navigator as Navigator & {
+    webkitGetUserMedia?: (
+      constraints: MediaStreamConstraints,
+      onSuccess: (stream: MediaStream) => void,
+      onError: (error: unknown) => void,
+    ) => void;
+    mozGetUserMedia?: (
+      constraints: MediaStreamConstraints,
+      onSuccess: (stream: MediaStream) => void,
+      onError: (error: unknown) => void,
+    ) => void;
+    msGetUserMedia?: (
+      constraints: MediaStreamConstraints,
+      onSuccess: (stream: MediaStream) => void,
+      onError: (error: unknown) => void,
+    ) => void;
+  };
+
+  const legacyGetUserMedia =
+    legacyNavigator.webkitGetUserMedia
+    ?? legacyNavigator.mozGetUserMedia
+    ?? legacyNavigator.msGetUserMedia;
+
+  if (!legacyGetUserMedia) {
+    throw new Error('Microphone capture is not available in this app runtime. If you are on macOS, rebuild and relaunch the Tauri app so the microphone permission prompt can appear.');
+  }
+
+  return new Promise((resolve, reject) => {
+    legacyGetUserMedia.call(legacyNavigator, constraints, resolve, reject);
+  });
+};
+
+const getAudioContextConstructor = () => {
+  const audioWindow = window as Window & {
+    webkitAudioContext?: typeof AudioContext;
+  };
+
+  const audioContextConstructor = window.AudioContext ?? audioWindow.webkitAudioContext;
+
+  if (!audioContextConstructor) {
+    throw new Error('Audio processing is not available in this app runtime.');
+  }
+
+  return audioContextConstructor;
+};
+
+const getVoiceRuntimeUnavailableMessage = () => (
+  'Voice input requires the Tauri app runtime. Running the frontend-only Vite dev server is not sufficient. Start the desktop app with "npm run dev" from the repo root or "npm run dev --prefix crates/hstack-app".'
+);
 
 
 // --- Engraved Dark Themes ---
@@ -474,6 +677,8 @@ const TicketCard = ({ ticket, savedLocations }: { ticket: TicketModel; savedLoca
 };
 
 // --- Main App Component ---
+const VOICE_SEND_ARM_DELAY_MS = 700;
+
 function App() {
   const { tickets, syncNow, isConnected } = useSync();
   const { t } = useI18n();
@@ -487,10 +692,209 @@ function App() {
     const [interactionState, setInteractionState] = useState<InteractionState>('IDLE');
     const [showSetup, setShowSetup] = useState(false);
     const [savedLocations, setSavedLocations] = useState<SavedLocationIndex>({});
+    const [voiceSettings, setVoiceSettings] = useState<UserSettings['voice'] | null>(null);
+    const [voiceSecretStatus, setVoiceSecretStatus] = useState<VoiceSecretStatus | null>(null);
+    const [voiceCapability, setVoiceCapability] = useState<VoiceCapabilityResponse | null>(null);
+    const [isRecording, setIsRecording] = useState(false);
+    const [voiceError, setVoiceError] = useState<string | null>(null);
+    const [isSendTemporarilyLocked, setIsSendTemporarilyLocked] = useState(false);
     const supportsDesktopWindowControls = useMemo(() => canUseDesktopWindowControls(), []);
 
     const inputRef = useRef<HTMLTextAreaElement>(null);
     const drawerRef = useRef<HTMLDivElement>(null);
+    const mediaStreamRef = useRef<MediaStream | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const processorRef = useRef<ScriptProcessorNode | null>(null);
+    const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+    const voiceDraftPrefixRef = useRef("");
+    const liveTranscriptRef = useRef("");
+    const voiceSendChainRef = useRef<Promise<void>>(Promise.resolve());
+    const voiceSessionActiveRef = useRef(false);
+    const voiceLastTransportErrorRef = useRef<string | null>(null);
+    const sendUnlockTimeoutRef = useRef<number | null>(null);
+
+    const scheduleSendUnlock = () => {
+      if (sendUnlockTimeoutRef.current !== null) {
+        window.clearTimeout(sendUnlockTimeoutRef.current);
+      }
+
+      setIsSendTemporarilyLocked(true);
+      sendUnlockTimeoutRef.current = window.setTimeout(() => {
+        setIsSendTemporarilyLocked(false);
+        sendUnlockTimeoutRef.current = null;
+      }, VOICE_SEND_ARM_DELAY_MS);
+    };
+
+    const refreshVoiceAvailability = async () => {
+      try {
+        await invoke('warm_secure_store');
+
+        const [settings, session, secretStatus] = await Promise.all([
+          invoke<UserSettings>('get_settings'),
+          invoke<SyncSessionInfo>('get_sync_session'),
+          invoke<VoiceSecretStatus>('get_voice_secret_status'),
+        ]);
+
+        setVoiceSettings(settings.voice);
+        setVoiceSecretStatus(secretStatus);
+        setVoiceError(null);
+
+        const remoteConfig = resolveRemoteSyncConfig(settings as UserSettingsShape, session);
+        if (!remoteConfig) {
+          setVoiceCapability(null);
+          return;
+        }
+
+        const response = await fetch(buildApiUrl(remoteConfig.baseUrl, '/api/voice/capability'), {
+          headers: {
+            Authorization: `Bearer ${remoteConfig.token}`,
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Voice capability request failed: ${response.status}`);
+        }
+
+        const capability = await response.json() as VoiceCapabilityResponse;
+        setVoiceCapability(capability);
+      } catch (error) {
+        console.error('Failed to refresh voice availability:', error);
+        setVoiceCapability(null);
+        setVoiceError(error instanceof Error ? error.message : 'Voice availability could not be loaded.');
+      }
+    };
+
+    const stopRecording = async () => {
+      processorRef.current?.disconnect();
+      sourceNodeRef.current?.disconnect();
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      await audioContextRef.current?.close().catch(() => undefined);
+
+      processorRef.current = null;
+      sourceNodeRef.current = null;
+      mediaStreamRef.current = null;
+      audioContextRef.current = null;
+
+      await voiceSendChainRef.current.catch(() => undefined);
+
+      if (voiceSessionActiveRef.current) {
+        await invoke('stop_voice_transcription').catch((error) => {
+          console.error('Failed to stop voice transcription:', error);
+        });
+      }
+
+      voiceSessionActiveRef.current = false;
+      setIsRecording(false);
+      if (liveTranscriptRef.current.trim().length > 0 || inputValue.trim().length > 0) {
+        scheduleSendUnlock();
+      }
+    };
+
+    const startRecording = async () => {
+      if (isProcessing || isRecording || !voiceSettings) {
+        return;
+      }
+
+      if (!isTauri()) {
+        setVoiceError(getVoiceRuntimeUnavailableMessage());
+        return;
+      }
+
+      const managedAvailable = voiceSettings.mode === 'Auto' && voiceCapability?.available;
+      const directAvailable = voiceSettings.mode === 'DirectOnly' && voiceSecretStatus?.direct_api_key_present;
+      if (!managedAvailable && !directAvailable) {
+        setVoiceError('Voice input is not available with the current configuration.');
+        return;
+      }
+
+      try {
+        setVoiceError(null);
+        voiceLastTransportErrorRef.current = null;
+        liveTranscriptRef.current = '';
+        voiceDraftPrefixRef.current = inputValue;
+        voiceSendChainRef.current = Promise.resolve();
+        if (sendUnlockTimeoutRef.current !== null) {
+          window.clearTimeout(sendUnlockTimeoutRef.current);
+          sendUnlockTimeoutRef.current = null;
+        }
+        setIsSendTemporarilyLocked(false);
+
+        const settings = await invoke<UserSettings>('get_settings');
+        const session = await invoke<SyncSessionInfo>('get_sync_session');
+        const remoteConfig = resolveRemoteSyncConfig(settings as UserSettingsShape, session);
+
+        await invoke('start_voice_transcription', {
+          remoteBaseUrl: settings.voice.mode === 'Auto' ? remoteConfig?.baseUrl ?? null : null,
+        });
+        voiceSessionActiveRef.current = true;
+
+        const mediaStream = await requestMicrophoneStream();
+
+        const AudioContextConstructor = getAudioContextConstructor();
+        const audioContext = new AudioContextConstructor();
+        const sourceNode = audioContext.createMediaStreamSource(mediaStream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (event) => {
+          const inputBuffer = event.inputBuffer.getChannelData(0);
+          const resampled = downsampleBuffer(inputBuffer, audioContext.sampleRate, 16000);
+          const pcmBytes = floatTo16BitPcm(resampled);
+          const audioBase64 = uint8ArrayToBase64(pcmBytes);
+
+          voiceSendChainRef.current = voiceSendChainRef.current
+            .then(async () => {
+              await invoke('append_voice_audio_chunk', { audioBase64 });
+            })
+            .catch((error) => {
+              console.error('Failed to append voice audio chunk:', error);
+              setVoiceError(
+                voiceLastTransportErrorRef.current
+                  || (error instanceof Error ? error.message : 'Voice streaming failed.')
+              );
+            });
+        };
+
+        sourceNode.connect(processor);
+        processor.connect(audioContext.destination);
+
+        mediaStreamRef.current = mediaStream;
+        audioContextRef.current = audioContext;
+        sourceNodeRef.current = sourceNode;
+        processorRef.current = processor;
+        setIsRecording(true);
+      } catch (error) {
+        console.error('Failed to start recording:', error);
+        setVoiceError(error instanceof Error ? error.message : 'Voice recording could not start.');
+        await stopRecording();
+      }
+    };
+
+    const handleVoiceButton = async () => {
+      if (isRecording) {
+        await stopRecording();
+        return;
+      }
+
+      await startRecording();
+    };
+
+    const voiceInputEnabled = useMemo(() => {
+      if (!voiceSettings || voiceSettings.mode === 'Disabled') {
+        return false;
+      }
+
+      if (voiceSettings.mode === 'Auto') {
+        return Boolean(voiceCapability?.available);
+      }
+
+      if (voiceSettings.mode === 'DirectOnly') {
+        return Boolean(voiceSecretStatus?.direct_api_key_present);
+      }
+
+      return false;
+    }, [voiceCapability?.available, voiceSecretStatus?.direct_api_key_present, voiceSettings]);
+
+    const hasDraftText = inputValue.trim().length > 0;
 
     const minimizeWindow = (e?: React.MouseEvent) => {
       if (e) e.stopPropagation();
@@ -519,6 +923,7 @@ function App() {
 
         checkOnboarding();
       loadSavedLocations();
+      void refreshVoiceAvailability();
         syncNow();
     }, []);
     useEffect(() => {
@@ -529,10 +934,64 @@ function App() {
             setSavedLocations(Object.fromEntries(locations.map((location: SavedLocationRecord) => [location.id, location])));
           })
           .catch((error) => console.error('Failed to refresh saved locations:', error));
+        void refreshVoiceAvailability();
       }
     }, [isSettingsOpen]);
     useEffect(() => { if (drawerRef.current && isHistoryExpanded) { drawerRef.current.scrollTop = drawerRef.current.scrollHeight; } }, [chatHistory, isHistoryExpanded]);
     useEffect(() => { if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.style.height = (inputRef.current.scrollHeight) + 'px'; if (inputValue === '') { inputRef.current.style.height = '48px'; } } }, [inputValue]);
+
+    useEffect(() => {
+      let unlisten: (() => void) | null = null;
+
+      void listen<VoiceEventPayload>(VOICE_EVENT, (event) => {
+        const payload = event.payload;
+
+        if (payload.type === 'partial' && payload.text) {
+          liveTranscriptRef.current = mergeVoiceTranscript(liveTranscriptRef.current, payload.text);
+          setInputValue(composeVoiceDraft(voiceDraftPrefixRef.current, liveTranscriptRef.current));
+          return;
+        }
+
+        if (payload.type === 'done') {
+          if (typeof payload.text === 'string' && payload.text.length > 0) {
+            liveTranscriptRef.current = payload.text;
+            setInputValue(composeVoiceDraft(voiceDraftPrefixRef.current, liveTranscriptRef.current));
+          }
+          voiceSessionActiveRef.current = false;
+          setIsRecording(false);
+          if ((payload.text || liveTranscriptRef.current).trim().length > 0) {
+            scheduleSendUnlock();
+          }
+          return;
+        }
+
+        if (payload.type === 'error') {
+          voiceSessionActiveRef.current = false;
+          voiceLastTransportErrorRef.current = payload.message || 'Voice transcription failed.';
+          setVoiceError(voiceLastTransportErrorRef.current);
+          setIsRecording(false);
+          return;
+        }
+
+        if (payload.type === 'stopped') {
+          voiceSessionActiveRef.current = false;
+          setIsRecording(false);
+          if (liveTranscriptRef.current.trim().length > 0 || inputValue.trim().length > 0) {
+            scheduleSendUnlock();
+          }
+        }
+      }).then((dispose) => {
+        unlisten = dispose;
+      });
+
+      return () => {
+        if (sendUnlockTimeoutRef.current !== null) {
+          window.clearTimeout(sendUnlockTimeoutRef.current);
+        }
+        unlisten?.();
+        void stopRecording();
+      };
+    }, []);
 
     const handleAction = async (e?: React.FormEvent) => {
         if (e) e.preventDefault(); const message = inputValue.trim(); if (!message || isProcessing) return;
@@ -657,11 +1116,64 @@ function App() {
                 <WebGLGrain colors={{ c1: [30, 30, 30], c2: [22, 22, 22], c3: [16, 16, 16], c4: [12, 12, 12] }} />
                 <div className="absolute top-0 left-0 right-0 h-[1px] bg-white/[0.03] z-10" />
                 <div className="relative z-20">
-                <form onSubmit={handleAction} className={cn("chat-input-wrapper flex items-end bg-transparent p-[20px_24px_28px] transition-all duration-400 relative overflow-hidden", isProcessing && "shadow-[inset_0_0_30px_rgba(99,102,241,0.1)]")} style={{ paddingBottom: 'calc(28px + env(safe-area-inset-bottom, 0px))' }}>
-                        {isProcessing && (<div className="effect-container absolute inset-0 z-0 pointer-events-none overflow-hidden transition-opacity duration-500 opacity-100 scale-150"><div className="pearl-gradient pearl-slow" /><div className="pearl-gradient pearl-fast" /></div>)}
+                <form onSubmit={handleAction} className={cn("chat-input-wrapper flex items-end bg-transparent p-[20px_24px_28px] transition-all duration-400 relative overflow-hidden", isProcessing && "shadow-[inset_0_0_26px_rgba(132,142,166,0.08)]")} style={{ paddingBottom: 'calc(28px + env(safe-area-inset-bottom, 0px))' }}>
+                        {isProcessing && (
+                          <div className="effect-container absolute inset-0 z-0 pointer-events-none overflow-hidden transition-opacity duration-500 opacity-100">
+                            <div className="composer-processing-mask absolute inset-0">
+                              <AnimatedWebGLGrain
+                                colors={COMPOSER_PROCESSING_THEME}
+                                animatedPalette={{
+                                  from: COMPOSER_PROCESSING_THEME,
+                                  to: COMPOSER_PROCESSING_THEME_COOL,
+                                  durationMs: 4200,
+                                }}
+                                spreadX={0.52}
+                                spreadY={1.28}
+                                contrast={1.85}
+                                noiseFactor={0.62}
+                                opacity={1}
+                              />
+                            </div>
+                            <div className="composer-processing-drift composer-processing-drift-primary absolute inset-[-35%_-10%_-15%_-10%]" />
+                            <div className="composer-processing-drift composer-processing-drift-secondary absolute inset-[-45%_-14%_-10%_-14%]" />
+                            <div className="composer-processing-sheen absolute inset-0" />
+                            <div className="composer-processing-vignette absolute inset-0" />
+                          </div>
+                        )}
                         <textarea ref={inputRef} value={inputValue} onChange={(e) => setInputValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAction(); } }} placeholder={interactionState === 'AWAITING_REPLY' ? t('placeholderReplyAgent') : placeholder} className={cn("flex-1 bg-transparent border-none text-[#d1d1d1] text-[14px] outline-none resize-none min-h-[40px] max-h-[120px] leading-[1.6] relative z-10 transition-colors", interactionState === 'AWAITING_REPLY' ? "text-white placeholder:text-white/30" : "placeholder:text-[#555]")} />
-                        <button type="submit" disabled={isProcessing || !inputValue.trim()} className={cn("send-btn border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30", interactionState === 'AWAITING_REPLY' ? "bg-white text-black shadow-[0_0_15px_rgba(255,255,255,0.2)]" : "bg-white text-black")}><Send size={20} /></button>
+                        {isRecording ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleVoiceButton();
+                            }}
+                            disabled={isProcessing}
+                            className={cn(
+                              "border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30",
+                              "bg-white text-black"
+                            )}
+                            title="Stop recording"
+                          >
+                            <Square size={16} />
+                          </button>
+                        ) : hasDraftText ? <button type="submit" disabled={isProcessing || !hasDraftText || isSendTemporarilyLocked} className={cn("send-btn border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30", interactionState === 'AWAITING_REPLY' ? "bg-white text-black shadow-[0_0_15px_rgba(255,255,255,0.2)]" : "bg-white text-black")}><Send size={20} /></button> : voiceSettings?.mode !== 'Disabled' ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleVoiceButton();
+                            }}
+                            disabled={isProcessing || !voiceInputEnabled}
+                            className={cn(
+                              "border-none w-10 h-10 rounded-full flex items-center justify-center cursor-pointer transition-all shrink-0 ml-4 mb-0 relative z-10 hover:scale-105 active:scale-95 disabled:opacity-30",
+                              "bg-white/10 text-white"
+                            )}
+                            title="Start voice input"
+                          >
+                            <Mic size={18} />
+                          </button>
+                        ) : null}
                     </form>
+                    {voiceError ? <div className="px-6 pb-4 text-[12px] leading-5 text-red-300/80 relative z-20">{voiceError}</div> : null}
                 </div>
             </div>
             <AnimatePresence>{isSettingsOpen && (<Settings isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />)}</AnimatePresence>

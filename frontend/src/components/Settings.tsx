@@ -4,10 +4,10 @@ import { Key, X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { WebGLGrain } from "./WebGLGrain";
 import { authenticateRemote, clearRemoteSession, formatRemoteUserName, saveRemoteSession, type RemoteAuthMode, resolveAuthBaseUrl } from "../syncAuth";
-import { normalizeSyncBaseUrl, notifySyncConfigUpdated, type SyncSessionInfo } from "../syncConfig";
+import { buildApiUrl, normalizeSyncBaseUrl, notifySyncConfigUpdated, resolveRemoteSyncConfig, type SyncSessionInfo } from "../syncConfig";
 import { useI18n } from "../i18n";
-import { LocaleSection, HostingSyncSection, ProviderModal, ProvidersSection, SavedLocationsSection } from "./settings/sections";
-import { OPENAI_DEFAULT_ENDPOINT, OPENAI_DEFAULT_MODEL, type GeminiModelSummary, type ProviderDraft, type SavedProvider, type UserSettings } from "./settings/types";
+import { LocaleSection, HostingSyncSection, ProviderModal, ProvidersSection, SavedLocationsSection, VoiceSection } from "./settings/sections";
+import { OPENAI_DEFAULT_ENDPOINT, OPENAI_DEFAULT_MODEL, type GeminiModelSummary, type ProviderDraft, type SavedProvider, type UserSettings, type VoiceCapabilityResponse, type VoiceSecretStatus } from "./settings/types";
 
 interface SettingsProps {
     isOpen: boolean;
@@ -27,6 +27,10 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
     const [syncPassword, setSyncPassword] = useState('');
     const [syncPending, setSyncPending] = useState(false);
     const [syncError, setSyncError] = useState<string | null>(null);
+    const [voiceSecretStatus, setVoiceSecretStatus] = useState<VoiceSecretStatus | null>(null);
+    const [voiceCapability, setVoiceCapability] = useState<VoiceCapabilityResponse | null>(null);
+    const [voiceCapabilityError, setVoiceCapabilityError] = useState<string | null>(null);
+    const [voiceApiKeyDraft, setVoiceApiKeyDraft] = useState('');
     const [geminiModels, setGeminiModels] = useState<GeminiModelSummary[]>([]);
     const [isLoadingGeminiModels, setIsLoadingGeminiModels] = useState(false);
     const [geminiModelsError, setGeminiModelsError] = useState<string | null>(null);
@@ -41,20 +45,53 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
 
     useEffect(() => {
         if (isOpen) {
-            loadSettings();
+            void loadSettings();
         }
     }, [isOpen]);
 
+    const refreshVoiceCapability = async (loadedSettings: UserSettings, loadedSession: SyncSessionInfo) => {
+        const remoteConfig = resolveRemoteSyncConfig(loadedSettings, loadedSession);
+
+        if (!remoteConfig) {
+            setVoiceCapability(null);
+            setVoiceCapabilityError(null);
+            return;
+        }
+
+        try {
+            const response = await fetch(buildApiUrl(remoteConfig.baseUrl, '/api/voice/capability'), {
+                headers: {
+                    Authorization: `Bearer ${remoteConfig.token}`,
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error(`Capability request failed: ${response.status}`);
+            }
+
+            const capability = await response.json() as VoiceCapabilityResponse;
+            setVoiceCapability(capability);
+            setVoiceCapabilityError(null);
+        } catch (error) {
+            console.error('Failed to load voice capability:', error);
+            setVoiceCapability(null);
+            setVoiceCapabilityError(error instanceof Error ? error.message : 'Failed to load managed voice capability.');
+        }
+    };
+
     const loadSettings = async () => {
         try {
-            const [loadedSettings, loadedSession] = await Promise.all([
+            const [loadedSettings, loadedSession, loadedVoiceSecretStatus] = await Promise.all([
                 invoke<UserSettings>("get_settings"),
                 invoke<SyncSessionInfo>("get_sync_session"),
+                invoke<VoiceSecretStatus>("get_voice_secret_status"),
             ]);
             setSettings(loadedSettings);
             setSyncSession(loadedSession);
+            setVoiceSecretStatus(loadedVoiceSecretStatus);
             setSyncError(null);
             setSyncPassword('');
+            await refreshVoiceCapability(loadedSettings, loadedSession);
         } catch (err) {
             console.error("Failed to load settings:", err);
         }
@@ -380,11 +417,61 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
             setSyncLastName('');
             setSyncPassword('');
             setSyncError(null);
+            setVoiceCapability(null);
+            setVoiceCapabilityError(null);
             notifySyncConfigUpdated();
         } catch (err) {
             console.error('Failed to clear sync session:', err);
         } finally {
             setSyncPending(false);
+        }
+    };
+
+    const handleVoiceModeChange = async (mode: UserSettings['voice']['mode']) => {
+        if (!settings) return;
+        const updated = {
+            ...settings,
+            voice: {
+                ...settings.voice,
+                mode,
+            },
+        };
+        await persistSettings(updated);
+    };
+
+    const handleVoiceFieldChange = async (patch: Partial<UserSettings['voice']>) => {
+        if (!settings) return;
+        const updated = {
+            ...settings,
+            voice: {
+                ...settings.voice,
+                ...patch,
+            },
+        };
+        await persistSettings(updated);
+    };
+
+    const handleSaveVoiceApiKey = async () => {
+        if (!voiceApiKeyDraft.trim()) {
+            return;
+        }
+
+        try {
+            await invoke('save_voice_direct_api_key', { apiKey: voiceApiKeyDraft.trim() });
+            setVoiceApiKeyDraft('');
+            setVoiceSecretStatus({ direct_api_key_present: true });
+        } catch (error) {
+            console.error('Failed to save voice API key:', error);
+        }
+    };
+
+    const handleClearVoiceApiKey = async () => {
+        try {
+            await invoke('clear_voice_direct_api_key');
+            setVoiceApiKeyDraft('');
+            setVoiceSecretStatus({ direct_api_key_present: false });
+        } catch (error) {
+            console.error('Failed to clear voice API key:', error);
         }
     };
 
@@ -562,6 +649,26 @@ export const Settings = ({ isOpen, onClose }: SettingsProps) => {
                                 onSyncPasswordChange={setSyncPassword}
                                 onRemoteAuth={handleRemoteAuth}
                                 onSignOut={handleSignOut}
+                            />
+
+                            <VoiceSection
+                                settings={settings}
+                                t={t}
+                                voiceSecretStatus={voiceSecretStatus}
+                                voiceCapability={voiceCapability}
+                                voiceCapabilityError={voiceCapabilityError}
+                                voiceApiKeyDraft={voiceApiKeyDraft}
+                                onVoiceModeChange={handleVoiceModeChange}
+                                onVoiceFieldChange={(patch) => {
+                                    void handleVoiceFieldChange(patch);
+                                }}
+                                onVoiceApiKeyDraftChange={setVoiceApiKeyDraft}
+                                onSaveVoiceApiKey={() => {
+                                    void handleSaveVoiceApiKey();
+                                }}
+                                onClearVoiceApiKey={() => {
+                                    void handleClearVoiceApiKey();
+                                }}
                             />
 
                             <ProvidersSection

@@ -1,5 +1,6 @@
 use crate::provider::{ProviderKind, RateLimitConfig};
 use crate::ticket::TicketLocation;
+use crate::voice::VoiceSettings;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +32,8 @@ pub struct SavedLocation {
 pub struct UserSettings {
     pub providers: Vec<SavedProvider>,
     pub default_provider_id: Option<String>,
+    #[serde(default)]
+    pub voice: VoiceSettings,
     pub local_processing: bool,
     pub locale: Option<String>,
     pub hour12: Option<bool>,

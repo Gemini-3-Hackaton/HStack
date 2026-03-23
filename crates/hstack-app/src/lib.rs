@@ -7,10 +7,12 @@ mod location_utils;
 mod planner_support;
 mod secure_store;
 mod sync_runtime;
+mod voice_runtime;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
 use serde_json::Value;
+use rustls::crypto::ring::default_provider;
 use hstack_core::error::Error as CoreError;
 use hstack_core::provider::gemini::generate_gemini_content;
 use hstack_core::provider::openai_compat::generate_openai_content;
@@ -154,16 +156,16 @@ CRITICAL: TEMPORAL EXTRACTION - RRULE FORMAT (RFC 5545)
 The `rrule` field MUST be a valid RRULE string following iCalendar RFC 5545.
 
 RRULE STRUCTURE:
-- DTSTART: Start datetime (YYYYMMDDTHHMMSSZ) - ALWAYS append 'Z' and calculate the UTC time using the user's offset.
+- DTSTART: Start datetime in the user's local wall time (YYYYMMDDTHHMMSS). Do not convert it to UTC and do not append 'Z'.
 - RRULE: Recurrence rule (optional, for repeating events)
 
 COMMON PATTERNS:
-- One-time tomorrow 9am: DTSTART:20260320T090000Z
-- Every Monday 9am: DTSTART:20260324T090000Z RRULE:FREQ=WEEKLY;BYDAY=MO
-- Daily 9am: DTSTART:20260320T090000Z RRULE:FREQ=DAILY
+- One-time tomorrow 9am: DTSTART:20260320T090000
+- Every Monday 9am: DTSTART:20260324T090000 RRULE:FREQ=WEEKLY;BYDAY=MO
+- Daily 9am: DTSTART:20260320T090000 RRULE:FREQ=DAILY
 
 RULES:
-1. Calculate DTSTART in UTC based on the user's relative date and local timezone offset.
+1. Keep DTSTART in the user's local wall time exactly as requested.
 2. Any time-bearing ticket may use the `rrule` field. Use `DTSTART:...` for one-time scheduling, and add `RRULE:...` when the ticket repeats.
 3. Separate DTSTART and RRULE with a space.
 
@@ -198,14 +200,14 @@ TICKET TYPES:
  EVENT: Time-specific appointments, gatherings, meetings, and calendar-like items. Can use `rrule` for one-time or repeating scheduling.
 
 TOOL EXAMPLES:
-- create_ticket: {{\"type\": \"TASK\", \"title\": \"Walk the dog\", \"rrule\": \"DTSTART:20260320T140000Z\"}}
-- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260322T090000Z\"}}
+- create_ticket: {{\"type\": \"TASK\", \"title\": \"Walk the dog\", \"rrule\": \"DTSTART:20260320T140000\"}}
+- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260322T090000\"}}
 - edit_ticket: {{\"ticket_id\": \"uuid\", \"title\": \"Walk the dog (Jimbo)\"}}
-- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260326T100000Z\"}}
-- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Yoga\", \"rrule\": \"DTSTART:20260326T100000Z\", \"duration_minutes\": 120}}
-- create_ticket: {{\"type\": \"HABIT\", \"title\": \"Morning workout\", \"rrule\": \"DTSTART:20260320T070000Z RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\"}}
-- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Jimbo birthday party\", \"rrule\": \"DTSTART:20260327T190000Z\"}}
-- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Weekly team standup\", \"rrule\": \"DTSTART:20260324T083000Z RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR\"}}
+- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260326T100000\"}}
+- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Yoga\", \"rrule\": \"DTSTART:20260326T100000\", \"duration_minutes\": 120}}
+- create_ticket: {{\"type\": \"HABIT\", \"title\": \"Morning workout\", \"rrule\": \"DTSTART:20260320T070000 RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\"}}
+- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Jimbo birthday party\", \"rrule\": \"DTSTART:20260327T190000\"}}
+- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Weekly team standup\", \"rrule\": \"DTSTART:20260324T083000 RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR\"}}
 - create_ticket: {{\"type\": \"EVENT\", \"title\": \"Dinner at home\", \"location\": {{\"location_type\": \"saved_location\", \"location_id\": \"loc-home\"}}}}
 
 REMEMBER:
@@ -1048,10 +1050,22 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
     }
 }
 
+fn install_rustls_crypto_provider() -> Result<(), String> {
+    default_provider()
+        .install_default()
+        .map(|_| ())
+        .map_err(|error| format!("failed to install rustls crypto provider: {error:?}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Err(error) = install_rustls_crypto_provider() {
+        panic!("{error}");
+    }
+
     let app = match tauri::Builder::default()
         .manage(NativeSyncRuntimeState::default())
+        .manage(voice_runtime::VoiceRuntimeState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
@@ -1059,6 +1073,10 @@ pub fn run() {
             app_state::save_settings,
             app_state::upsert_provider,
             app_state::delete_provider,
+            app_state::warm_secure_store,
+            app_state::get_voice_secret_status,
+            app_state::save_voice_direct_api_key,
+            app_state::clear_voice_direct_api_key,
             chat_local,
             app_state::get_tickets,
             app_state::apply_sync_update,
@@ -1071,7 +1089,10 @@ pub fn run() {
             sync_runtime::stop_native_sync,
             sync_runtime::get_sync_connection_status,
             sync_runtime::queue_sync_action,
-            sync_runtime::sync_refresh_now
+            sync_runtime::sync_refresh_now,
+            voice_runtime::start_voice_transcription,
+            voice_runtime::append_voice_audio_chunk,
+            voice_runtime::stop_voice_transcription
         ])
         .build(tauri::generate_context!()) {
             Ok(app) => app,

@@ -11,12 +11,18 @@ use crate::secure_store::SecureStore;
 use crate::sync_runtime::SYNC_TICKETS_CHANGED_EVENT;
 
 const SYNC_TOKEN_KEY: &str = "hstack-sync-token";
+pub(crate) const VOICE_DIRECT_API_KEY_KEY: &str = "hstack-voice-direct-api-key";
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SyncSessionInfo {
     pub(crate) user_id: Option<i64>,
     pub(crate) user_name: Option<String>,
     pub(crate) token: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct VoiceSecretStatus {
+    pub(crate) direct_api_key_present: bool,
 }
 
 #[tauri::command]
@@ -246,6 +252,39 @@ pub async fn clear_sync_session(app: AppHandle) -> Result<(), String> {
     settings.sync_user_id = None;
     settings.sync_user_name = None;
     save_settings(app, settings).await
+}
+
+#[tauri::command]
+pub async fn get_voice_secret_status(app: AppHandle) -> Result<VoiceSecretStatus, String> {
+    let api_key = SecureStore::get_key(&app, VOICE_DIRECT_API_KEY_KEY)?;
+    Ok(VoiceSecretStatus {
+        direct_api_key_present: !api_key.trim().is_empty(),
+    })
+}
+
+#[tauri::command]
+pub async fn warm_secure_store(app: AppHandle) -> Result<(), String> {
+    let settings = get_settings(app.clone()).await?;
+    let mut ids = vec![SYNC_TOKEN_KEY.to_string(), VOICE_DIRECT_API_KEY_KEY.to_string()];
+    ids.extend(settings.providers.iter().map(|provider| provider.id.clone()));
+    ids.sort();
+    ids.dedup();
+    SecureStore::warm_keys(&app, &ids)
+}
+
+#[tauri::command]
+pub async fn save_voice_direct_api_key(app: AppHandle, api_key: String) -> Result<(), String> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Err("voice api key must not be empty".to_string());
+    }
+
+    SecureStore::set_key(&app, VOICE_DIRECT_API_KEY_KEY, trimmed)
+}
+
+#[tauri::command]
+pub async fn clear_voice_direct_api_key(app: AppHandle) -> Result<(), String> {
+    SecureStore::delete_key(&app, VOICE_DIRECT_API_KEY_KEY)
 }
 
 #[tauri::command]
