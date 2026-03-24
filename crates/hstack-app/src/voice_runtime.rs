@@ -310,12 +310,14 @@ async fn run_voice_session_inner(
     );
 
     let mut stop_sent = false;
+    let mut appended_audio = false;
 
     loop {
         tokio::select! {
             command = command_rx.recv(), if !stop_sent => {
                 match command {
                     Some(VoiceRuntimeCommand::AppendAudio { audio_base64 }) => {
+                        appended_audio = true;
                         let append_message = json!({
                             "type": "input_audio.append",
                             "audio": audio_base64,
@@ -327,14 +329,19 @@ async fn run_voice_session_inner(
                             .map_err(|error| format!("failed to stream audio chunk: {error}"))?;
                     }
                     Some(VoiceRuntimeCommand::Stop) | None => {
-                        socket
-                            .send(Message::Text(json!({ "type": "input_audio.flush" }).to_string().into()))
-                            .await
-                            .map_err(|error| format!("failed to flush voice audio: {error}"))?;
-                        socket
-                            .send(Message::Text(json!({ "type": "input_audio.end" }).to_string().into()))
-                            .await
-                            .map_err(|error| format!("failed to end voice audio: {error}"))?;
+                        if appended_audio {
+                            socket
+                                .send(Message::Text(json!({ "type": "input_audio.flush" }).to_string().into()))
+                                .await
+                                .map_err(|error| format!("failed to flush voice audio: {error}"))?;
+                            socket
+                                .send(Message::Text(json!({ "type": "input_audio.end" }).to_string().into()))
+                                .await
+                                .map_err(|error| format!("failed to end voice audio: {error}"))?;
+                        } else {
+                            let _ = socket.close(None).await;
+                            break;
+                        }
                         stop_sent = true;
                     }
                 }

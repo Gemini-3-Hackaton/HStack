@@ -819,6 +819,12 @@ function App() {
         }
         setIsSendTemporarilyLocked(false);
 
+        const mediaStream = await requestMicrophoneStream();
+        const AudioContextConstructor = getAudioContextConstructor();
+        const audioContext = new AudioContextConstructor();
+        const sourceNode = audioContext.createMediaStreamSource(mediaStream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
         const settings = await invoke<UserSettings>('get_settings');
         const session = await invoke<SyncSessionInfo>('get_sync_session');
         const remoteConfig = resolveRemoteSyncConfig(settings as UserSettingsShape, session);
@@ -827,13 +833,6 @@ function App() {
           remoteBaseUrl: settings.voice.mode === 'Auto' ? remoteConfig?.baseUrl ?? null : null,
         });
         voiceSessionActiveRef.current = true;
-
-        const mediaStream = await requestMicrophoneStream();
-
-        const AudioContextConstructor = getAudioContextConstructor();
-        const audioContext = new AudioContextConstructor();
-        const sourceNode = audioContext.createMediaStreamSource(mediaStream);
-        const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
         processor.onaudioprocess = (event) => {
           const inputBuffer = event.inputBuffer.getChannelData(0);

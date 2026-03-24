@@ -241,6 +241,39 @@ fn emit_tickets_changed(app: &AppHandle) {
     let _ = app.emit(SYNC_TICKETS_CHANGED_EVENT, json!({}));
 }
 
+fn commute_needs_remote_refresh(ticket: &Ticket) -> bool {
+    if ticket.r#type != TicketType::Commute {
+        return false;
+    }
+
+    match &ticket.payload {
+        TicketPayload::Commute { directions, .. } => {
+            let Some(Value::Object(directions)) = directions.as_ref() else {
+                return true;
+            };
+
+            let duration_missing = directions
+                .get("total_duration_minutes")
+                .is_none_or(Value::is_null);
+            let duration_placeholder = directions
+                .get("total_duration")
+                .and_then(Value::as_str)
+                .map(|value| value.trim().is_empty() || value == "Enriching via Server...")
+                .unwrap_or(true);
+
+            duration_missing || duration_placeholder
+        }
+        _ => false,
+    }
+}
+
+fn build_commute_refresh_url(config: &RemoteSyncConfig, ticket_id: &str) -> Result<String, String> {
+    build_api_url(
+        &config.base_url,
+        &format!("/api/tickets/{ticket_id}/commute/refresh"),
+    )
+}
+
 fn update_status(
     app: &AppHandle,
     runtime_state: &Arc<Mutex<NativeSyncControllerState>>,
@@ -264,7 +297,37 @@ fn update_status(
     }
 }
 
-async fn fetch_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Result<(), String> {
+async fn refresh_remote_commute_ticket(config: &RemoteSyncConfig, ticket_id: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(build_commute_refresh_url(config, ticket_id)?)
+        .bearer_auth(&config.token)
+        .send()
+        .await
+        .map_err(|error| format!("commute refresh failed for {ticket_id}: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "commute refresh failed for {ticket_id} with status {}",
+            response.status()
+        ));
+    }
+
+    Ok(())
+}
+
+async fn refresh_remote_commutes_if_needed(
+    config: &RemoteSyncConfig,
+    ticket_ids: Vec<String>,
+) -> Result<(), String> {
+    for ticket_id in ticket_ids {
+        refresh_remote_commute_ticket(config, &ticket_id).await?;
+    }
+
+    Ok(())
+}
+
+async fn fetch_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Result<Vec<String>, String> {
     let client = reqwest::Client::new();
     let response = client
         .get(&config.api_url)
@@ -287,8 +350,20 @@ async fn fetch_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Resul
         tickets.push(map_remote_ticket(record)?);
     }
 
+    let commute_refresh_ids = tickets
+        .iter()
+        .filter(|ticket| commute_needs_remote_refresh(ticket))
+        .map(|ticket| ticket.id.clone())
+        .collect::<Vec<_>>();
+
     apply_sync_update_state(app.clone(), tickets).await?;
-    Ok(())
+    Ok(commute_refresh_ids)
+}
+
+async fn sync_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Result<(), String> {
+    let commute_refresh_ids = fetch_remote_state(app, config).await?;
+    emit_tickets_changed(app);
+    refresh_remote_commutes_if_needed(config, commute_refresh_ids).await
 }
 
 async fn send_hello(
@@ -477,8 +552,8 @@ async fn run_sync_runtime(
                                     }
                                 }
                                 Some(SyncRuntimeCommand::Refresh) => {
-                                    match fetch_remote_state(&app, &config).await {
-                                        Ok(()) => emit_tickets_changed(&app),
+                                    match sync_remote_state(&app, &config).await {
+                                        Ok(()) => {}
                                         Err(error) => {
                                             update_status(
                                                 &app,
@@ -528,9 +603,8 @@ async fn run_sync_runtime(
                                         }
                                         "OUT_OF_SYNC" => {
                                             let _ = serde_json::from_value::<ServerHelloOutOfSync>(parsed.clone()).map(|message| message.server_hash);
-                                            match fetch_remote_state(&app, &config).await {
+                                            match sync_remote_state(&app, &config).await {
                                                 Ok(()) => {
-                                                    emit_tickets_changed(&app);
                                                     let _ = flush_pending_actions(&app, &mut socket).await;
                                                 }
                                                 Err(error) => {
@@ -550,8 +624,8 @@ async fn run_sync_runtime(
                                         }
                                         "SYNC_ACK" => {
                                             if serde_json::from_value::<SyncAck>(parsed).is_ok() {
-                                                match fetch_remote_state(&app, &config).await {
-                                                    Ok(()) => emit_tickets_changed(&app),
+                                                match sync_remote_state(&app, &config).await {
+                                                    Ok(()) => {}
                                                     Err(error) => {
                                                         update_status(
                                                             &app,
@@ -570,8 +644,8 @@ async fn run_sync_runtime(
                                         }
                                         "STATE_UPDATED" => {
                                             if serde_json::from_value::<ServerStateUpdated>(parsed).is_ok() {
-                                                match fetch_remote_state(&app, &config).await {
-                                                    Ok(()) => emit_tickets_changed(&app),
+                                                match sync_remote_state(&app, &config).await {
+                                                    Ok(()) => {}
                                                     Err(error) => {
                                                         update_status(
                                                             &app,
