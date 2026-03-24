@@ -22,7 +22,11 @@ export interface RemoteSyncConfig {
 
 export const SYNC_CONFIG_UPDATED_EVENT = 'hstack:sync-config-updated';
 
-const OFFICIAL_CLOUD_URL = (import.meta.env.VITE_OFFICIAL_CLOUD_URL || '').trim();
+const DEFAULT_OFFICIAL_CLOUD_URL = 'https://hstack-private-api.onrender.com';
+
+const OFFICIAL_CLOUD_URL = (
+  import.meta.env.VITE_OFFICIAL_CLOUD_URL || DEFAULT_OFFICIAL_CLOUD_URL
+).trim();
 
 export const normalizeSyncBaseUrl = (value: string | null | undefined) => {
   const trimmed = value?.trim();
