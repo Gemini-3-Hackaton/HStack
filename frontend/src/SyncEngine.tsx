@@ -29,6 +29,8 @@ export type SyncActionType = 'CREATE' | 'UPDATE' | 'DELETE';
 interface SyncContextType {
   tickets: TicketModel[];
   isConnected: boolean;
+  hasRemoteSession: boolean;
+  connectionPhase: string;
   createTicket: (type: TicketType, payload: any, status?: TicketStatus) => Promise<string>;
   updateTicket: (id: string, payload: any) => Promise<void>;
   updateTicketStatus: (id: string, status: TicketStatus) => Promise<void>;
@@ -65,6 +67,7 @@ export const SyncContext = createContext<SyncContextType | undefined>(undefined)
 export const SyncProvider = ({ children }: { children: ReactNode; userId?: number }) => {
   const [tickets, setTickets] = useState<TicketModel[]>([]);
   const [isConnected, setIsConnected] = useState(false);
+  const [connectionPhase, setConnectionPhase] = useState('idle');
   const [syncSettings, setSyncSettings] = useState<SyncSettings | null>(null);
   const [syncSession, setSyncSession] = useState<SyncSessionInfo | null>(null);
 
@@ -79,6 +82,8 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
 
   const loadSyncConfig = useCallback(async () => {
     try {
+      await invoke('warm_secure_store');
+
       const [settings, session] = await Promise.all([
         invoke<SyncSettings>('get_settings'),
         invoke<SyncSessionInfo>('get_sync_session'),
@@ -87,6 +92,7 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
       setSyncSession(session);
     } catch (error) {
       console.error('Failed to load sync configuration:', error);
+      setSyncSession(null);
     }
   }, []);
 
@@ -94,6 +100,7 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
     try {
       const status = await invoke<SyncConnectionStatus>('get_sync_connection_status');
       setIsConnected(status.connected);
+      setConnectionPhase(status.phase);
     } catch (error) {
       console.error('Failed to load sync status:', error);
     }
@@ -114,6 +121,7 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
 
     void listen<SyncConnectionStatus>(SYNC_STATUS_EVENT, (event) => {
       setIsConnected(event.payload.connected);
+      setConnectionPhase(event.payload.phase);
     }).then((unlisten) => {
       removeStatusListener = unlisten;
     });
@@ -153,6 +161,13 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
     })();
   }, [syncSettings, syncSession]);
 
+  const hasRemoteSession = Boolean(
+    syncSettings
+      && resolveRemoteBaseUrl(syncSettings)
+      && syncSession?.user_id
+      && syncSession?.token
+  );
+
   const queueAction = useCallback(async (action: QueueSyncActionRequest) => {
     const nextTickets = await invoke<TicketModel[]>('queue_sync_action', { action });
     setTickets(nextTickets);
@@ -187,7 +202,19 @@ export const SyncProvider = ({ children }: { children: ReactNode; userId?: numbe
 
 
   return (
-    <SyncContext.Provider value={{ tickets, isConnected, createTicket, updateTicket, updateTicketStatus, deleteTicket, syncNow }}>
+    <SyncContext.Provider
+      value={{
+        tickets,
+        isConnected,
+        hasRemoteSession,
+        connectionPhase,
+        createTicket,
+        updateTicket,
+        updateTicketStatus,
+        deleteTicket,
+        syncNow,
+      }}
+    >
       {children}
     </SyncContext.Provider>
   );

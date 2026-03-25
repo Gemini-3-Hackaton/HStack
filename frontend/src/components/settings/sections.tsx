@@ -136,7 +136,7 @@ export const HostingSyncSection = ({
 
       {hasRemoteMode && settings ? (
         <PhysicalWrapper outerClass="rounded-[1.15rem]" innerClass="flex flex-col gap-4 p-4" shaderColors={THEMES.default}>
-          <div className="relative z-20 flex items-start justify-between gap-4">
+          <div className="relative z-20 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
               <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/32">{t('account')}</p>
               <p className="mt-2 text-[14px] leading-6 text-[#E6E6E6]">
@@ -148,7 +148,7 @@ export const HostingSyncSection = ({
               </p>
             </div>
             {remoteBaseUrl ? (
-              <span className="shrink-0 rounded-full border border-white/10 bg-black/15 px-3 py-1 text-[10px] font-medium text-white/34">
+              <span className="max-w-full self-start overflow-hidden text-ellipsis whitespace-nowrap rounded-full border border-white/10 bg-black/15 px-3 py-1 text-[10px] font-medium text-white/34 sm:max-w-[16rem]">
                 {remoteBaseUrl}
               </span>
             ) : null}

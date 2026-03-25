@@ -297,7 +297,7 @@ Return exactly this JSON shape:
     \"type\": \"EVENT|TASK|HABIT|null\",
     \"title\": \"string|null\",
     \"rrule\": \"string|null\",
-    \"duration_minutes\": 0
+        \"duration_minutes\": null
   }}],
   \"proactive_opportunities\": [\"string\"],
   \"assumptions_to_apply\": [\"string\"],
@@ -321,7 +321,8 @@ Planning rules:
 10. tool_actions must use only AVAILABLE TOOLS and arguments must match the tool schema exactly.
 11. If no tool action is needed, return an empty tool_actions array.
 12. If a place matches SAVED LOCATIONS, use its location_id instead of raw text.
-13. If a place is ambiguous, do not emit a tool action for it; require a clarification question in user_reply_strategy.",
+13. If a place is ambiguous, do not emit a tool action for it; require a clarification question in user_reply_strategy.
+14. Use null for duration_minutes when there is no explicit duration. Only use a positive integer when the user actually specified or strongly implied a duration.",
         local_time,
         local_date,
         weekday,
@@ -474,18 +475,6 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         Ok(value) => value,
                         Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
                     };
-                    let task_status = match parse_optional_deserialized_arg::<TaskWorkflowStatus>(&args, "status", "task status") {
-                        Ok(value) => value,
-                        Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
-                    };
-                    let event_status = match parse_optional_deserialized_arg::<EventAttendanceStatus>(&args, "status", "event status") {
-                        Ok(value) => value,
-                        Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
-                    };
-                    let habit_status = match parse_optional_deserialized_arg::<HabitWorkflowStatus>(&args, "status", "habit status") {
-                        Ok(value) => value,
-                        Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
-                    };
                     let event_location = match resolve_event_location(&args, &settings) {
                         Ok(value) => value,
                         Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
@@ -512,7 +501,10 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                             title,
                             scheduled_time_iso,
                             rrule: rrule_out,
-                            status: habit_status,
+                            status: match parse_optional_deserialized_arg::<HabitWorkflowStatus>(&args, "status", "habit status") {
+                                Ok(value) => value,
+                                Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
+                            },
                             priority,
                             completed: Some(false),
                         },
@@ -522,7 +514,10 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                             rrule: rrule_out,
                             duration_minutes,
                             location: event_location,
-                            status: event_status,
+                            status: match parse_optional_deserialized_arg::<EventAttendanceStatus>(&args, "status", "event status") {
+                                Ok(value) => value,
+                                Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
+                            },
                             priority,
                             completed: Some(false),
                         },
@@ -531,7 +526,10 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                             scheduled_time_iso,
                             rrule: rrule_out,
                             duration_minutes,
-                            status: task_status,
+                            status: match parse_optional_deserialized_arg::<TaskWorkflowStatus>(&args, "status", "task status") {
+                                Ok(value) => value,
+                                Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
+                            },
                             priority,
                             completed: Some(false),
                         },
@@ -1281,6 +1279,27 @@ mod tests {
 
         let error = expect_plan_validation_error(plan);
         assert!(error.contains("action_required=true"));
+    }
+
+    #[test]
+    fn accepts_zero_duration_commitment_when_create_ticket_omits_duration() {
+        let mut plan = sample_plan();
+        plan.new_commitments_detected[0] = PlannerCommitment {
+            r#type: Some("TASK".to_string()),
+            title: Some("Walk the cat".to_string()),
+            rrule: None,
+            duration_minutes: Some(0),
+        };
+        plan.tool_actions = vec![PlannerAction {
+            tool: "create_ticket".to_string(),
+            arguments: json!({
+                "type": "TASK",
+                "title": "Walk the cat"
+            }),
+        }];
+        plan.dependent_tickets_impacted.clear();
+
+        assert_plan_is_valid(plan);
     }
 
     #[test]

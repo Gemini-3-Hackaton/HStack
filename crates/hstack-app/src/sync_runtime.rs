@@ -490,9 +490,9 @@ async fn run_sync_runtime(
                     &runtime_state,
                     generation,
                     SyncConnectionStatus {
-                        connected: true,
-                        phase: "connected".to_string(),
-                        message: None,
+                        connected: false,
+                        phase: "handshaking".to_string(),
+                        message: Some("sync websocket connected; waiting for protocol handshake".to_string()),
                         transport_owner: "tauri-rust".to_string(),
                     },
                 );
@@ -597,6 +597,17 @@ async fn run_sync_runtime(
                                         "ACK" => {
                                             if let Ok(ack) = serde_json::from_value::<ServerHelloAck>(parsed.clone()) {
                                                 if ack.status == "IN_SYNC" {
+                                                    update_status(
+                                                        &app,
+                                                        &runtime_state,
+                                                        generation,
+                                                        SyncConnectionStatus {
+                                                            connected: true,
+                                                            phase: "connected".to_string(),
+                                                            message: None,
+                                                            transport_owner: "tauri-rust".to_string(),
+                                                        },
+                                                    );
                                                     let _ = flush_pending_actions(&app, &mut socket).await;
                                                 }
                                             }
@@ -605,6 +616,17 @@ async fn run_sync_runtime(
                                             let _ = serde_json::from_value::<ServerHelloOutOfSync>(parsed.clone()).map(|message| message.server_hash);
                                             match sync_remote_state(&app, &config).await {
                                                 Ok(()) => {
+                                                    update_status(
+                                                        &app,
+                                                        &runtime_state,
+                                                        generation,
+                                                        SyncConnectionStatus {
+                                                            connected: true,
+                                                            phase: "connected".to_string(),
+                                                            message: None,
+                                                            transport_owner: "tauri-rust".to_string(),
+                                                        },
+                                                    );
                                                     let _ = flush_pending_actions(&app, &mut socket).await;
                                                 }
                                                 Err(error) => {
@@ -624,6 +646,17 @@ async fn run_sync_runtime(
                                         }
                                         "SYNC_ACK" => {
                                             if serde_json::from_value::<SyncAck>(parsed).is_ok() {
+                                                update_status(
+                                                    &app,
+                                                    &runtime_state,
+                                                    generation,
+                                                    SyncConnectionStatus {
+                                                        connected: true,
+                                                        phase: "connected".to_string(),
+                                                        message: None,
+                                                        transport_owner: "tauri-rust".to_string(),
+                                                    },
+                                                );
                                                 match sync_remote_state(&app, &config).await {
                                                     Ok(()) => {}
                                                     Err(error) => {
@@ -644,6 +677,17 @@ async fn run_sync_runtime(
                                         }
                                         "STATE_UPDATED" => {
                                             if serde_json::from_value::<ServerStateUpdated>(parsed).is_ok() {
+                                                update_status(
+                                                    &app,
+                                                    &runtime_state,
+                                                    generation,
+                                                    SyncConnectionStatus {
+                                                        connected: true,
+                                                        phase: "connected".to_string(),
+                                                        message: None,
+                                                        transport_owner: "tauri-rust".to_string(),
+                                                    },
+                                                );
                                                 match sync_remote_state(&app, &config).await {
                                                     Ok(()) => {}
                                                     Err(error) => {

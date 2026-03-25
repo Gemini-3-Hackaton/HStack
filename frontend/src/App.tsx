@@ -680,7 +680,7 @@ const TicketCard = ({ ticket, savedLocations }: { ticket: TicketModel; savedLoca
 const VOICE_SEND_ARM_DELAY_MS = 700;
 
 function App() {
-  const { tickets, syncNow, isConnected } = useSync();
+  const { tickets, syncNow, isConnected, hasRemoteSession, connectionPhase } = useSync();
   const { t } = useI18n();
     const [inputValue, setInputValue] = useState("");
     const [isProcessing, setIsProcessing] = useState(false);
@@ -1020,7 +1020,19 @@ function App() {
                 {supportsDesktopWindowControls ? <button onClick={minimizeWindow} className="w-9 h-9 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all pointer-events-auto bg-white/5 rounded-full hover:bg-white/10"><ChevronDown size={20} /></button> : <div className="w-9 h-9" />}
                     <div className="flex items-center gap-3 pointer-events-auto h-full">
                         <button onClick={() => setIsSettingsOpen(true)} className="w-9 h-9 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all bg-white/5 rounded-full hover:bg-white/10"><SettingsIcon size={18} /></button>
-                        <div className={cn("w-9 h-9 rounded-full flex items-center justify-center border transition-all duration-300 bg-white/5", isConnected ? "border-white/10 text-[var(--text-primary)]" : "border-white/5 text-[var(--text-secondary)] opacity-40 grayscale")}>{isConnected ? <Wifi size={18} strokeWidth={2} /> : <WifiOff size={18} strokeWidth={2} />}</div>
+                        <div
+                          title={hasRemoteSession ? `Sync ${isConnected ? 'connected' : connectionPhase}` : 'Sync not configured'}
+                          className={cn(
+                            "w-9 h-9 rounded-full flex items-center justify-center border transition-all duration-300 bg-white/5",
+                            isConnected
+                              ? "border-white/10 text-[var(--text-primary)]"
+                              : hasRemoteSession
+                                ? "border-white/8 text-[var(--text-primary)] opacity-80"
+                                : "border-white/5 text-[var(--text-secondary)] opacity-40 grayscale"
+                          )}
+                        >
+                          {hasRemoteSession ? <Wifi size={18} strokeWidth={2} /> : <WifiOff size={18} strokeWidth={2} />}
+                        </div>
                         <div className="flex items-center h-9 bg-white/5 rounded-full border border-white/10 px-1 gap-1">
                             <button className="w-7 h-7 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors text-[var(--text-secondary)] hover:text-white"><Plus size={16} strokeWidth={2.5} /></button>
                             {integrations.length > 0 && (<><div className="w-[1px] h-4 bg-white/10 mx-0.5" /><div className="flex gap-1.5">{integrations.map(int => (<div key={int} className="w-7 h-7 rounded-full bg-[#0B0C0E] border border-white/10 flex items-center justify-center text-[var(--text-secondary)]" />))}</div><div className="text-[var(--text-secondary)] ml-1 mr-1"><ChevronRight size={14} strokeWidth={2.5} /></div></>)}

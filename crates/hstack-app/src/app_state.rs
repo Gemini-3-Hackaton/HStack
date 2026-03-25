@@ -217,10 +217,18 @@ pub(crate) async fn load_sync_session(app: AppHandle) -> Result<SyncSessionInfo,
     let settings = get_settings(app.clone()).await?;
     let token = SecureStore::get_key(&app, SYNC_TOKEN_KEY)?;
 
+    if token.is_empty() {
+        return Ok(SyncSessionInfo {
+            user_id: None,
+            user_name: None,
+            token: None,
+        });
+    }
+
     Ok(SyncSessionInfo {
         user_id: settings.sync_user_id,
         user_name: settings.sync_user_name,
-        token: if token.is_empty() { None } else { Some(token) },
+        token: Some(token),
     })
 }
 
