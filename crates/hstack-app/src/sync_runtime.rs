@@ -383,6 +383,27 @@ async fn send_hello(
         .map_err(|error| format!("failed to send sync HELLO: {error}"))
 }
 
+fn remove_acked_pending_actions(app: &AppHandle, ack_ids: &[Uuid]) -> Result<(), String> {
+    let store = app
+        .store("pending_actions.json")
+        .map_err(|error| format!("pending actions store failure: {error}"))?;
+
+    let mut pending_actions: Vec<SyncAction> = match store.get("pending") {
+        Some(value) => serde_json::from_value(value).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let original_len = pending_actions.len();
+    pending_actions.retain(|action| !ack_ids.iter().any(|id| id.to_string() == action.action_id));
+
+    if pending_actions.len() < original_len {
+        store.set("pending", serde_json::json!(pending_actions));
+        let _ = store.save();
+    }
+    
+    Ok(())
+}
+
 async fn flush_pending_actions(
     app: &AppHandle,
     socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
@@ -645,7 +666,7 @@ async fn run_sync_runtime(
                                             }
                                         }
                                         "SYNC_ACK" => {
-                                            if serde_json::from_value::<SyncAck>(parsed).is_ok() {
+                                            if let Ok(ack) = serde_json::from_value::<SyncAck>(parsed) {
                                                 update_status(
                                                     &app,
                                                     &runtime_state,
@@ -657,6 +678,7 @@ async fn run_sync_runtime(
                                                         transport_owner: "tauri-rust".to_string(),
                                                     },
                                                 );
+                                                let _ = remove_acked_pending_actions(&app, &ack.ack_action_ids);
                                                 match sync_remote_state(&app, &config).await {
                                                     Ok(()) => {}
                                                     Err(error) => {
