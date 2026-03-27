@@ -557,6 +557,7 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                                     return Ok(format!("⚠️ Tool failed: {}.", e));
                                 }
                             }
+                            let _ = sync_runtime::trigger_flush(&app);
                             Ok("Ticket created successfully.".to_string())
                         }
                         Err(e) => Ok(format!("⚠️ Tool failed: {}. The agent should analyze this error and try again with corrected parameters or a different approach. Details: {}", name, e)),
@@ -583,7 +584,10 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         None,
                         None,
                     ).await {
-                        Ok(_) => Ok("Ticket deleted.".to_string()),
+                        Ok(_) => {
+                            let _ = sync_runtime::trigger_flush(&app);
+                            Ok("Ticket deleted.".to_string())
+                        },
                         Err(e) => Ok(format!("⚠️ Tool failed: {}. Details: {}", name, e)),
                     }
                 }
@@ -597,29 +601,25 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         return Ok("⚠️ Tool failed: no tickets to delete.".to_string());
                     }
                     
-                    if let Ok(store) = app.store("pending_actions.json") {
-                        let mut actions: Vec<SyncAction> = store.get("pending")
-                            .and_then(|val| serde_json::from_value(val).ok())
-                            .unwrap_or_default();
-                            
-                        for ticket in tickets {
-                            actions.push(SyncAction {
-                                action_id: Uuid::new_v4().to_string(),
-                                r#type: SyncActionType::Delete,
-                                entity_id: ticket.id,
-                                entity_type: format!("{:?}", ticket.r#type).to_uppercase(),
-                                status: None,
-                                payload: None,
-                                notes: None,
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                            });
+                    let mut count = 0;
+                    for ticket in tickets {
+                         let actual_entity_type = format!("{:?}", ticket.r#type).to_uppercase();
+                         if let Err(e) = append_pending_action(
+                            &app,
+                            SyncActionType::Delete,
+                            ticket.id,
+                            actual_entity_type,
+                            None,
+                            None,
+                            None,
+                        ).await {
+                             return Ok(format!("⚠️ Tool failed while queueing deletion: {}", e));
                         }
-                        
-                        store.set("pending", serde_json::json!(actions));
-                        let _ = store.save();
+                        count += 1;
                     }
                     
-                    Ok("All tickets deleted.".to_string())
+                    let _ = sync_runtime::trigger_flush(&app);
+                    Ok(format!("Successfully deleted all {} tickets.", count))
                 }
                 "edit_ticket" => {
                     let ticket_id = args.get("ticket_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -937,21 +937,22 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         Err(e) => Ok(format!("⚠️ Tool failed: {}. The agent should analyze this error and try again with corrected parameters or a different approach. Details: {}", name, e)),
                     }
                 }
-                _ => Ok(format!("⚠️ Tool failed: unknown tool '{}'. The agent should use only valid tool names from the available tool list.", name)),
+                _ => Ok(format!("⚠️ Tool unknown: {}.", name)),
             }
         })
     });
 
     // Create context refresh callback
-    let app_clone2 = app.clone();
+    let app_for_refresh = app.clone();
     let context_refresh: ContextRefreshFn = Box::new(move || {
-        let app = app_clone2.clone();
+        let app = app_for_refresh.clone();
         Box::pin(async move {
-            build_system_prompt_with_fresh_context(app).await
-                .map_err(|e| hstack_core::error::Error::Internal(e))
+            let tickets = load_tickets_state(app).await.unwrap_or_default();
+            Ok(serde_json::to_string_pretty(&tickets).unwrap_or_else(|_| "[]".to_string()))
         })
     });
 
+    let _planner_app = app.clone();
     if let Some(plan) = plan_actions(app.clone(), &config, &history, &message, &tools).await? {
         if !plan.tool_actions.is_empty() {
             println!("--- EXECUTING VALIDATED PLANNER ACTIONS ---");
