@@ -2,5 +2,7 @@
 resolver = "3"
 members = [
     "crates/hstack-app",
-    "crates/hstack-core"
-, "crates/hstack-server-lite"]
+    "crates/hstack-core",
+    "crates/hstack-server-lite",
+    "crates/hstack-agent"
+]
