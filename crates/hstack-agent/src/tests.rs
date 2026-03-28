@@ -261,17 +261,19 @@ mod tests {
         };
         let limiter = LocalRateLimiter::new();
         
-        // Manually manipulate the state to simulate a deep queue (74 minutes)
+        // Max delay is 30 minutes (1800 seconds).
+        // If we book more than 1800s, the request should be rejected.
+        
         {
             let mut state = limiter.state.lock().await;
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
-            state.insert("rl:prov:greedy:batch:rps".to_string(), now + 4440.0);
+            state.insert("rl:prov:greedy:batch:rps".to_string(), now + 2000.0);
         }
 
         let result = limiter.acquire("greedy", 1, 0, &config).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            Error::RateLimitExceeded { wait_time } => assert!(wait_time > 4400.0),
+            Error::RateLimitExceeded { wait_time } => assert!(wait_time > 1900.0),
             _ => panic!("Expected RateLimitExceeded error"),
         }
     }

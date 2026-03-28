@@ -24,7 +24,7 @@ impl RedisRateLimiter {
         let client = redis::Client::open(redis_url).map_err(|e| Error::Redis(e.to_string()))?;
         Ok(Self {
             client,
-            max_queue_delay: 72.0 * 60.0, // 72 minutes as per reference
+            max_queue_delay: 30.0 * 60.0,
         })
     }
 
@@ -146,7 +146,7 @@ impl LocalRateLimiter {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(HashMap::new())),
-            max_queue_delay: 72.0 * 60.0,
+            max_queue_delay: 30.0 * 60.0,
         }
     }
 
