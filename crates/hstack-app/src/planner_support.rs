@@ -3,6 +3,10 @@ use std::collections::{HashMap, HashSet};
 use hstack_core::provider::Tool;
 use serde_json::Value;
 
+fn normalized_duration(duration: Option<i64>) -> Option<i64> {
+    duration.filter(|value| *value > 0)
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct PlannerCommitment {
     pub(crate) r#type: Option<String>,
@@ -232,7 +236,10 @@ pub(crate) fn validate_plan(plan: PlannerPlan, tools: &[Tool]) -> Result<Planner
 
         if action.tool == "create_ticket" {
             let ticket_type = args.get("type").and_then(Value::as_str).unwrap_or_default();
-            let has_duration = args.get("duration_minutes").and_then(Value::as_i64).is_some();
+            let has_duration = normalized_duration(
+                args.get("duration_minutes").and_then(Value::as_i64),
+            )
+            .is_some();
             let has_schedule = args.get("rrule").and_then(Value::as_str).is_some();
 
             if ticket_type == "EVENT" && has_duration && !has_schedule {
@@ -287,8 +294,11 @@ pub(crate) fn validate_plan(plan: PlannerPlan, tools: &[Tool]) -> Result<Planner
                 }
             }
 
-            if let Some(expected_duration) = commitment.duration_minutes {
-                let actual_duration = action.arguments.get("duration_minutes").and_then(Value::as_i64);
+            let expected_duration = normalized_duration(commitment.duration_minutes);
+            let actual_duration = normalized_duration(
+                action.arguments.get("duration_minutes").and_then(Value::as_i64),
+            );
+            if let Some(expected_duration) = expected_duration {
                 if actual_duration != Some(expected_duration) {
                     return Err(format!(
                         "planner commitment '{}' expected duration '{}' but create_ticket used '{:?}'",

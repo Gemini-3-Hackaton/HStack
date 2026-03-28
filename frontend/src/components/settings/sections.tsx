@@ -1,10 +1,10 @@
 import type { ChangeEvent, FocusEvent, KeyboardEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Database, Edit2, Globe, LoaderCircle, LogOut, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { Database, Edit2, Globe, LoaderCircle, LogOut, Mic, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { isOfficialCloudConfigured, type SyncSessionInfo } from "../../syncConfig";
 import type { RemoteAuthMode } from "../../syncAuth";
 import { getSupportedLocale, SUPPORTED_LOCALE_OPTIONS, type TranslationKey } from "../../i18n";
-import { OPENAI_DEFAULT_ENDPOINT, type GeminiModelSummary, type ProviderDraft, type SavedProvider, type UserSettings } from "./types";
+import { OPENAI_DEFAULT_ENDPOINT, VOICE_DEFAULT_ENDPOINT, type GeminiModelSummary, type ProviderDraft, type SavedProvider, type UserSettings, type VoiceCapabilityResponse, type VoiceSecretStatus } from "./types";
 import { HOSTING_OPTIONS, cn, EngravedInput, InsetSurface, PhysicalWrapper, THEMES } from "./ui";
 
 type Translator = (key: TranslationKey, vars?: Record<string, string | number>) => string;
@@ -136,7 +136,7 @@ export const HostingSyncSection = ({
 
       {hasRemoteMode && settings ? (
         <PhysicalWrapper outerClass="rounded-[1.15rem]" innerClass="flex flex-col gap-4 p-4" shaderColors={THEMES.default}>
-          <div className="relative z-20 flex items-start justify-between gap-4">
+          <div className="relative z-20 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
               <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/32">{t('account')}</p>
               <p className="mt-2 text-[14px] leading-6 text-[#E6E6E6]">
@@ -148,7 +148,7 @@ export const HostingSyncSection = ({
               </p>
             </div>
             {remoteBaseUrl ? (
-              <span className="shrink-0 rounded-full border border-white/10 bg-black/15 px-3 py-1 text-[10px] font-medium text-white/34">
+              <span className="max-w-full self-start overflow-hidden text-ellipsis whitespace-nowrap rounded-full border border-white/10 bg-black/15 px-3 py-1 text-[10px] font-medium text-white/34 sm:max-w-[16rem]">
                 {remoteBaseUrl}
               </span>
             ) : null}
@@ -370,6 +370,155 @@ export const ProvidersSection = ({ settings, t, onAddNew, onSetDefault, onEditPr
     </div>
   </section>
 );
+
+interface VoiceSectionProps {
+  settings: UserSettings | null;
+  t: Translator;
+  voiceSecretStatus: VoiceSecretStatus | null;
+  voiceCapability: VoiceCapabilityResponse | null;
+  voiceCapabilityError: string | null;
+  voiceApiKeyDraft: string;
+  onVoiceModeChange: (mode: UserSettings['voice']['mode']) => void;
+  onVoiceFieldChange: (patch: Partial<UserSettings['voice']>) => void;
+  onVoiceApiKeyDraftChange: (value: string) => void;
+  onSaveVoiceApiKey: () => void;
+  onClearVoiceApiKey: () => void;
+}
+
+export const VoiceSection = ({
+  settings,
+  t,
+  voiceSecretStatus,
+  voiceCapability,
+  voiceCapabilityError,
+  voiceApiKeyDraft,
+  onVoiceModeChange,
+  onVoiceFieldChange,
+  onVoiceApiKeyDraftChange,
+  onSaveVoiceApiKey,
+  onClearVoiceApiKey,
+}: VoiceSectionProps) => {
+  const voiceSettings = settings?.voice;
+  const modeOptions: Array<{ value: UserSettings['voice']['mode']; title: TranslationKey; description: TranslationKey }> = [
+    { value: 'Disabled', title: 'voiceModeDisabledTitle', description: 'voiceModeDisabledDescription' },
+    { value: 'Auto', title: 'voiceModeAutoTitle', description: 'voiceModeAutoDescription' },
+    { value: 'DirectOnly', title: 'voiceModeDirectTitle', description: 'voiceModeDirectDescription' },
+  ];
+
+  return (
+    <section className="mb-8">
+      <div className="mb-4 flex items-center justify-between px-1">
+        <h3 className="flex items-center gap-2 text-[12px] font-bold uppercase tracking-widest text-[#777]">{t('voiceInputTitle')}</h3>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        {modeOptions.map((option) => {
+          const isSelected = voiceSettings?.mode === option.value;
+
+          return (
+            <button key={option.value} type="button" onClick={() => onVoiceModeChange(option.value)} className="text-left">
+              <PhysicalWrapper
+                outerClass="rounded-[1.15rem]"
+                innerClass="flex items-start gap-3 px-3.5 py-3 transition-colors"
+                shaderColors={isSelected ? THEMES.emerald : THEMES.default}
+              >
+                <div className="relative z-20 min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2.5">
+                        <div className={cn("flex h-5 w-5 shrink-0 items-center justify-center transition-colors", isSelected ? "text-[#D9DDE4]" : "text-[#C8CDD6]") }>
+                          <Mic size={16} />
+                        </div>
+                        <span className="text-[16px] font-medium tracking-[-0.02em] text-[#F1F1F1]">{t(option.title)}</span>
+                      </div>
+                      <p className="mt-1 pr-1 text-[13px] leading-6 text-white/58">{t(option.description)}</p>
+                    </div>
+                    <span className={cn("inline-flex shrink-0 items-center pt-0.5 text-[9px] font-bold uppercase tracking-[0.22em]", isSelected ? "text-white/45" : "text-white/32") }>
+                      {isSelected ? t('current') : t('select')}
+                    </span>
+                  </div>
+                </div>
+              </PhysicalWrapper>
+            </button>
+          );
+        })}
+
+        <PhysicalWrapper outerClass="rounded-[1.15rem]" innerClass="flex flex-col gap-4 p-4" shaderColors={THEMES.default}>
+          <div className="relative z-20 flex flex-col gap-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <EngravedInput
+                label={t('voiceEndpointLabel')}
+                value={voiceSettings?.direct_api_base_url || VOICE_DEFAULT_ENDPOINT}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => onVoiceFieldChange({ direct_api_base_url: event.target.value })}
+                placeholder={VOICE_DEFAULT_ENDPOINT}
+              />
+              <EngravedInput
+                label={t('voiceModelLabel')}
+                value={voiceSettings?.direct_model_name || ''}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => onVoiceFieldChange({ direct_model_name: event.target.value })}
+                placeholder="voxtral-mini-transcribe-realtime-2602"
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end">
+              <EngravedInput
+                label={t('voiceApiKeyLabel')}
+                type="password"
+                value={voiceApiKeyDraft}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => onVoiceApiKeyDraftChange(event.target.value)}
+                placeholder={voiceSecretStatus?.direct_api_key_present ? t('apiKeyPlaceholderKeepExisting') : t('voiceApiKeyPlaceholder')}
+              />
+              <button
+                type="button"
+                onClick={onSaveVoiceApiKey}
+                disabled={!voiceApiKeyDraft.trim()}
+                className="inline-flex items-center justify-center rounded-[1rem] bg-[#EFEFEF] px-4 py-3 text-[11px] font-bold uppercase tracking-[0.2em] text-[#080808] transition-all hover:bg-white disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {t('saveApiKey')}
+              </button>
+              <button
+                type="button"
+                onClick={onClearVoiceApiKey}
+                disabled={!voiceSecretStatus?.direct_api_key_present}
+                className="inline-flex items-center justify-center rounded-[1rem] border border-white/10 px-4 py-3 text-[11px] font-bold uppercase tracking-[0.2em] text-white/58 transition-all hover:text-white disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {t('clearApiKey')}
+              </button>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <EngravedInput
+                label={t('voiceTargetDelayLabel')}
+                type="number"
+                min={0}
+                step={10}
+                value={voiceSettings?.target_streaming_delay_ms ?? ''}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                  const value = event.target.value.trim();
+                  onVoiceFieldChange({ target_streaming_delay_ms: value ? Number(value) : null });
+                }}
+                placeholder="240"
+              />
+              <InsetSurface className="px-4 py-3">
+                <div className="text-[9px] font-bold uppercase tracking-widest text-[#777]">{t('managedVoiceStatus')}</div>
+                <div className="mt-2 text-[14px] text-[#E6E6E6]">
+                  {voiceCapability?.available ? t('managedVoiceAvailable') : t('managedVoiceUnavailable')}
+                </div>
+                <div className="mt-1 text-[12px] leading-5 text-white/42">
+                  {voiceCapabilityError
+                    ? voiceCapabilityError
+                    : voiceCapability?.reason
+                      ? t('managedVoiceReason', { reason: voiceCapability.reason })
+                      : t('managedVoiceHint')}
+                </div>
+              </InsetSurface>
+            </div>
+          </div>
+        </PhysicalWrapper>
+      </div>
+    </section>
+  );
+};
 
 interface LocaleSectionProps {
   settings: UserSettings | null;

@@ -8,7 +8,7 @@ use hstack_core::ticket::{decode_ticket_payload_for_type, Ticket, TicketPayload,
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_store::StoreExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::{http::Request, Message}};
@@ -166,11 +166,18 @@ fn resolve_remote_sync_config(base_url: String, session: SyncSessionInfo) -> Res
 }
 
 fn build_ws_request(config: &RemoteSyncConfig) -> Result<Request<()>, String> {
-    Request::builder()
-        .uri(&config.ws_url)
-        .header("Authorization", format!("Bearer {}", config.token))
-        .body(())
-        .map_err(|error| format!("failed to build websocket request: {error}"))
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    
+    let mut request = config.ws_url.as_str().into_client_request()
+        .map_err(|error| format!("failed to parse websocket uri: {error}"))?;
+        
+    let auth_header_value = format!("Bearer {}", config.token)
+        .parse()
+        .map_err(|error| format!("failed to construct auth header: {error}"))?;
+        
+    request.headers_mut().insert("Authorization", auth_header_value);
+    
+    Ok(request)
 }
 
 fn parse_remote_ticket_type(value: &str) -> TicketType {
@@ -241,6 +248,39 @@ fn emit_tickets_changed(app: &AppHandle) {
     let _ = app.emit(SYNC_TICKETS_CHANGED_EVENT, json!({}));
 }
 
+fn commute_needs_remote_refresh(ticket: &Ticket) -> bool {
+    if ticket.r#type != TicketType::Commute {
+        return false;
+    }
+
+    match &ticket.payload {
+        TicketPayload::Commute { directions, .. } => {
+            let Some(Value::Object(directions)) = directions.as_ref() else {
+                return true;
+            };
+
+            let duration_missing = directions
+                .get("total_duration_minutes")
+                .is_none_or(Value::is_null);
+            let duration_placeholder = directions
+                .get("total_duration")
+                .and_then(Value::as_str)
+                .map(|value| value.trim().is_empty() || value == "Enriching via Server...")
+                .unwrap_or(true);
+
+            duration_missing || duration_placeholder
+        }
+        _ => false,
+    }
+}
+
+fn build_commute_refresh_url(config: &RemoteSyncConfig, ticket_id: &str) -> Result<String, String> {
+    build_api_url(
+        &config.base_url,
+        &format!("/api/tickets/{ticket_id}/commute/refresh"),
+    )
+}
+
 fn update_status(
     app: &AppHandle,
     runtime_state: &Arc<Mutex<NativeSyncControllerState>>,
@@ -264,7 +304,37 @@ fn update_status(
     }
 }
 
-async fn fetch_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Result<(), String> {
+async fn refresh_remote_commute_ticket(config: &RemoteSyncConfig, ticket_id: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .post(build_commute_refresh_url(config, ticket_id)?)
+        .bearer_auth(&config.token)
+        .send()
+        .await
+        .map_err(|error| format!("commute refresh failed for {ticket_id}: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "commute refresh failed for {ticket_id} with status {}",
+            response.status()
+        ));
+    }
+
+    Ok(())
+}
+
+async fn refresh_remote_commutes_if_needed(
+    config: &RemoteSyncConfig,
+    ticket_ids: Vec<String>,
+) -> Result<(), String> {
+    for ticket_id in ticket_ids {
+        refresh_remote_commute_ticket(config, &ticket_id).await?;
+    }
+
+    Ok(())
+}
+
+async fn fetch_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Result<Vec<String>, String> {
     let client = reqwest::Client::new();
     let response = client
         .get(&config.api_url)
@@ -272,6 +342,8 @@ async fn fetch_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Resul
         .send()
         .await
         .map_err(|error| format!("remote state fetch failed: {error}"))?;
+    
+    println!("--- fetch_remote_state success: received response from server ---");
 
     if !response.status().is_success() {
         return Err(format!("remote state fetch failed with status {}", response.status()));
@@ -287,7 +359,34 @@ async fn fetch_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Resul
         tickets.push(map_remote_ticket(record)?);
     }
 
+    let commute_refresh_ids = tickets
+        .iter()
+        .filter(|ticket| commute_needs_remote_refresh(ticket))
+        .map(|ticket| ticket.id.clone())
+        .collect::<Vec<_>>();
+
+    println!("--- fetch_remote_state: applying sync update to local store ---");
     apply_sync_update_state(app.clone(), tickets).await?;
+    println!("--- fetch_remote_state completed successfully ---");
+    Ok(commute_refresh_ids)
+}
+
+async fn sync_remote_state(app: &AppHandle, config: &RemoteSyncConfig) -> Result<(), String> {
+    let commute_refresh_ids = fetch_remote_state(app, config).await?;
+    emit_tickets_changed(app);
+    
+    // Sidecar: refresh commutes in the background so they don't block the main sync outcome
+    if !commute_refresh_ids.is_empty() {
+        let config_clone = config.clone();
+        tokio::spawn(async move {
+            if let Err(e) = refresh_remote_commutes_if_needed(&config_clone, commute_refresh_ids).await {
+                eprintln!("--- Background commute refresh failed: {} ---", e);
+            } else {
+                println!("--- Background commute refresh success ---");
+            }
+        });
+    }
+
     Ok(())
 }
 
@@ -308,6 +407,32 @@ async fn send_hello(
         .map_err(|error| format!("failed to send sync HELLO: {error}"))
 }
 
+fn remove_acked_pending_actions(app: &AppHandle, ack_ids: &[Uuid]) -> Result<(), String> {
+    println!("--- remove_acked_pending_actions invoked with {} ack_ids. ---", ack_ids.len());
+    let store = app
+        .store("pending_actions.json")
+        .map_err(|error| format!("pending actions store failure: {error}"))?;
+
+    let mut pending_actions: Vec<SyncAction> = match store.get("pending") {
+        Some(value) => serde_json::from_value(value).unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let original_len = pending_actions.len();
+    pending_actions.retain(|action| !ack_ids.iter().any(|id| id.to_string() == action.action_id));
+    println!("--- remove_acked_pending_actions retained {} out of {} actions ---", pending_actions.len(), original_len);
+
+    if pending_actions.len() < original_len {
+        store.set("pending", serde_json::json!(pending_actions));
+        let _ = store.save();
+        println!("--- pending_actions.json successfully overwritten with {} items remaining ---", pending_actions.len());
+    } else {
+        println!("--- No actions were matched to be removed from pending_actions.json ---");
+    }
+    
+    Ok(())
+}
+
 async fn flush_pending_actions(
     app: &AppHandle,
     socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
@@ -317,18 +442,38 @@ async fn flush_pending_actions(
         .map_err(|error| format!("pending actions store failure: {error}"))?;
 
     let pending_actions: Vec<SyncAction> = match store.get("pending") {
-        Some(value) => serde_json::from_value(value).unwrap_or_default(),
-        None => Vec::new(),
+        Some(value) => {
+            let res: Vec<SyncAction> = serde_json::from_value(value).unwrap_or_default();
+            println!("--- flush_pending_actions found {} pending actions in store ---", res.len());
+            res
+        }
+        None => {
+            println!("--- flush_pending_actions found no pending actions ---");
+            Vec::new()
+        }
     };
 
     if pending_actions.is_empty() {
         return Ok(());
     }
 
-    let actions = pending_actions
+    let actions: Vec<_> = pending_actions
         .into_iter()
-        .map(pending_action_to_input)
-        .collect::<Result<Vec<_>, _>>()?;
+        .filter_map(|action| {
+            match pending_action_to_input(action) {
+                Ok(input) => Some(input),
+                Err(error) => {
+                    eprintln!("--- skipping malformed pending action: {} ---", error);
+                    None
+                }
+            }
+        })
+        .collect();
+
+    if actions.is_empty() {
+        println!("--- flush_pending_actions: all actions were malformed, nothing to send ---");
+        return Ok(());
+    }
 
     let message = SyncActionsMessage {
         r#type: "SYNC_ACTIONS".to_string(),
@@ -374,6 +519,7 @@ async fn run_sync_runtime(
     mut command_rx: mpsc::UnboundedReceiver<SyncRuntimeCommand>,
 ) {
     let mut reconnect_delay_seconds = 1;
+    println!("--- run_sync_runtime thread spawned for url: {} ---", config.ws_url);
 
     loop {
         update_status(
@@ -406,8 +552,9 @@ async fn run_sync_runtime(
             }
         };
 
-        match connect_async(request).await {
-            Ok((mut socket, _)) => {
+        match tokio::time::timeout(std::time::Duration::from_secs(10), connect_async(request)).await {
+            Ok(Ok((mut socket, _))) => {
+                println!("--- WebSocket successfully connected to {} ---", config.ws_url);
                 reconnect_delay_seconds = 1;
 
                 update_status(
@@ -415,9 +562,9 @@ async fn run_sync_runtime(
                     &runtime_state,
                     generation,
                     SyncConnectionStatus {
-                        connected: true,
-                        phase: "connected".to_string(),
-                        message: None,
+                        connected: false,
+                        phase: "handshaking".to_string(),
+                        message: Some("sync websocket connected; waiting for protocol handshake".to_string()),
                         transport_owner: "tauri-rust".to_string(),
                     },
                 );
@@ -440,9 +587,30 @@ async fn run_sync_runtime(
                     }
                     return;
                 }
+                println!("--- HELLO sent successfully, entering handshake wait phase ---");
+
+                let handshake_deadline = tokio::time::sleep(Duration::from_secs(15));
+                tokio::pin!(handshake_deadline);
+                let mut handshake_completed = false;
 
                 loop {
                     tokio::select! {
+                        _ = &mut handshake_deadline, if !handshake_completed => {
+                            eprintln!("--- handshake timeout: server did not respond within 15s, reconnecting ---");
+                            update_status(
+                                &app,
+                                &runtime_state,
+                                generation,
+                                SyncConnectionStatus {
+                                    connected: false,
+                                    phase: "reconnecting".to_string(),
+                                    message: Some("handshake timeout: server did not respond within 15s".to_string()),
+                                    transport_owner: "tauri-rust".to_string(),
+                                },
+                            );
+                            let _ = socket.close(None).await;
+                            break;
+                        }
                         command = command_rx.recv() => {
                             match command {
                                 Some(SyncRuntimeCommand::Shutdown) | None => {
@@ -477,8 +645,8 @@ async fn run_sync_runtime(
                                     }
                                 }
                                 Some(SyncRuntimeCommand::Refresh) => {
-                                    match fetch_remote_state(&app, &config).await {
-                                        Ok(()) => emit_tickets_changed(&app),
+                                    match sync_remote_state(&app, &config).await {
+                                        Ok(()) => {}
                                         Err(error) => {
                                             update_status(
                                                 &app,
@@ -498,99 +666,6 @@ async fn run_sync_runtime(
                         }
                         message = socket.next() => {
                             match message {
-                                Some(Ok(Message::Text(text))) => {
-                                    let parsed: Value = match serde_json::from_str(&text) {
-                                        Ok(value) => value,
-                                        Err(error) => {
-                                            update_status(
-                                                &app,
-                                                &runtime_state,
-                                                generation,
-                                                SyncConnectionStatus {
-                                                    connected: true,
-                                                    phase: "connected".to_string(),
-                                                    message: Some(format!("ignored malformed sync message: {error}")),
-                                                    transport_owner: "tauri-rust".to_string(),
-                                                },
-                                            );
-                                            continue;
-                                        }
-                                    };
-
-                                    let message_type = parsed.get("type").and_then(Value::as_str).unwrap_or_default();
-                                    match message_type {
-                                        "ACK" => {
-                                            if let Ok(ack) = serde_json::from_value::<ServerHelloAck>(parsed.clone()) {
-                                                if ack.status == "IN_SYNC" {
-                                                    let _ = flush_pending_actions(&app, &mut socket).await;
-                                                }
-                                            }
-                                        }
-                                        "OUT_OF_SYNC" => {
-                                            let _ = serde_json::from_value::<ServerHelloOutOfSync>(parsed.clone()).map(|message| message.server_hash);
-                                            match fetch_remote_state(&app, &config).await {
-                                                Ok(()) => {
-                                                    emit_tickets_changed(&app);
-                                                    let _ = flush_pending_actions(&app, &mut socket).await;
-                                                }
-                                                Err(error) => {
-                                                    update_status(
-                                                        &app,
-                                                        &runtime_state,
-                                                        generation,
-                                                        SyncConnectionStatus {
-                                                            connected: true,
-                                                            phase: "connected".to_string(),
-                                                            message: Some(error),
-                                                            transport_owner: "tauri-rust".to_string(),
-                                                        },
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        "SYNC_ACK" => {
-                                            if serde_json::from_value::<SyncAck>(parsed).is_ok() {
-                                                match fetch_remote_state(&app, &config).await {
-                                                    Ok(()) => emit_tickets_changed(&app),
-                                                    Err(error) => {
-                                                        update_status(
-                                                            &app,
-                                                            &runtime_state,
-                                                            generation,
-                                                            SyncConnectionStatus {
-                                                                connected: true,
-                                                                phase: "connected".to_string(),
-                                                                message: Some(error),
-                                                                transport_owner: "tauri-rust".to_string(),
-                                                            },
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        "STATE_UPDATED" => {
-                                            if serde_json::from_value::<ServerStateUpdated>(parsed).is_ok() {
-                                                match fetch_remote_state(&app, &config).await {
-                                                    Ok(()) => emit_tickets_changed(&app),
-                                                    Err(error) => {
-                                                        update_status(
-                                                            &app,
-                                                            &runtime_state,
-                                                            generation,
-                                                            SyncConnectionStatus {
-                                                                connected: true,
-                                                                phase: "connected".to_string(),
-                                                                message: Some(error),
-                                                                transport_owner: "tauri-rust".to_string(),
-                                                            },
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
                                 Some(Ok(Message::Close(_))) | None => {
                                     update_status(
                                         &app,
@@ -605,7 +680,167 @@ async fn run_sync_runtime(
                                     );
                                     break;
                                 }
-                                Some(Ok(_)) => {}
+                                Some(Ok(msg)) => {
+                                    println!("--- Received raw WebSocket message: {:?} ---", msg);
+                                    if let Message::Text(text) = msg {
+                                        let parsed: Value = match serde_json::from_str(&text) {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                update_status(
+                                                    &app,
+                                                    &runtime_state,
+                                                    generation,
+                                                    SyncConnectionStatus {
+                                                        connected: true,
+                                                        phase: "connected".to_string(),
+                                                        message: Some(format!("ignored malformed sync message: {error}")),
+                                                        transport_owner: "tauri-rust".to_string(),
+                                                    },
+                                                );
+                                                continue;
+                                            }
+                                        };
+
+                                        let message_type = parsed.get("type").and_then(Value::as_str).unwrap_or_default();
+                                        match message_type {
+                                            "ACK" => {
+                                                println!("--- Sync Handshake: Received ACK/IN_SYNC from server ---");
+                                                handshake_completed = true;
+                                                if let Ok(ack) = serde_json::from_value::<ServerHelloAck>(parsed.clone()) {
+                                                    if ack.status == "IN_SYNC" {
+                                                        update_status(
+                                                            &app,
+                                                            &runtime_state,
+                                                            generation,
+                                                            SyncConnectionStatus {
+                                                                connected: true,
+                                                                phase: "connected".to_string(),
+                                                                message: None,
+                                                                transport_owner: "tauri-rust".to_string(),
+                                                            },
+                                                        );
+                                                        if let Err(error) = flush_pending_actions(&app, &mut socket).await {
+                                                            eprintln!("--- flush_pending_actions failed after ACK/IN_SYNC: {} ---", error);
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            "OUT_OF_SYNC" => {
+                                                println!("--- Sync Handshake: Received OUT_OF_SYNC from server ---");
+                                                handshake_completed = true;
+                                                let _ = serde_json::from_value::<ServerHelloOutOfSync>(parsed.clone()).map(|message| message.server_hash);
+                                                match sync_remote_state(&app, &config).await {
+                                                Ok(()) => {
+                                                    println!("--- Remote state synchronized, now flushing pending actions ---");
+                                                    update_status(
+                                                            &app,
+                                                            &runtime_state,
+                                                            generation,
+                                                            SyncConnectionStatus {
+                                                                connected: true,
+                                                                phase: "connected".to_string(),
+                                                                message: None,
+                                                                transport_owner: "tauri-rust".to_string(),
+                                                            },
+                                                        );
+                                                        if let Err(error) = flush_pending_actions(&app, &mut socket).await {
+                                                            eprintln!("--- flush_pending_actions failed after OUT_OF_SYNC: {} ---", error);
+                                                            break;
+                                                        }
+                                                    }
+                                                    Err(error) => {
+                                                        update_status(
+                                                            &app,
+                                                            &runtime_state,
+                                                            generation,
+                                                            SyncConnectionStatus {
+                                                                connected: true,
+                                                                phase: "connected".to_string(),
+                                                                message: Some(error),
+                                                                transport_owner: "tauri-rust".to_string(),
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            "SYNC_ACK" => {
+                                                println!("--- Received SYNC_ACK payload raw: {:?} ---", parsed);
+                                                match serde_json::from_value::<SyncAck>(parsed.clone()) {
+                                                    Ok(ack) => {
+                                                        println!("--- SYNC_ACK successfully parsed containing {} ack_action_ids ---", ack.ack_action_ids.len());
+                                                        update_status(
+                                                            &app,
+                                                            &runtime_state,
+                                                            generation,
+                                                            SyncConnectionStatus {
+                                                                connected: true,
+                                                                phase: "connected".to_string(),
+                                                                message: None,
+                                                                transport_owner: "tauri-rust".to_string(),
+                                                            },
+                                                        );
+                                                        if let Err(e) = remove_acked_pending_actions(&app, &ack.ack_action_ids) {
+                                                            eprintln!("--- Failed to remove acked pending actions: {} ---", e);
+                                                        }
+                                                        match sync_remote_state(&app, &config).await {
+                                                            Ok(()) => {}
+                                                            Err(error) => {
+                                                                update_status(
+                                                                    &app,
+                                                                    &runtime_state,
+                                                                    generation,
+                                                                    SyncConnectionStatus {
+                                                                        connected: true,
+                                                                        phase: "connected".to_string(),
+                                                                        message: Some(error),
+                                                                        transport_owner: "tauri-rust".to_string(),
+                                                                    },
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("--- Failed to deserialize SYNC_ACK: {:?} ---", e);
+                                                    }
+                                                }
+                                            }
+                                            "STATE_UPDATED" => {
+                                                println!("--- Received STATE_UPDATED from server ---");
+                                                if serde_json::from_value::<ServerStateUpdated>(parsed).is_ok() {
+                                                    update_status(
+                                                        &app,
+                                                        &runtime_state,
+                                                        generation,
+                                                        SyncConnectionStatus {
+                                                            connected: true,
+                                                            phase: "connected".to_string(),
+                                                            message: None,
+                                                            transport_owner: "tauri-rust".to_string(),
+                                                        },
+                                                    );
+                                                    match sync_remote_state(&app, &config).await {
+                                                        Ok(()) => {}
+                                                        Err(error) => {
+                                                            update_status(
+                                                                &app,
+                                                                &runtime_state,
+                                                                generation,
+                                                                SyncConnectionStatus {
+                                                                    connected: true,
+                                                                    phase: "connected".to_string(),
+                                                                    message: Some(error),
+                                                                    transport_owner: "tauri-rust".to_string(),
+                                                                },
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
                                 Some(Err(error)) => {
                                     update_status(
                                         &app,
@@ -625,7 +860,8 @@ async fn run_sync_runtime(
                     }
                 }
             }
-            Err(error) => {
+            Ok(Err(error)) => {
+                println!("--- WebSocket connection failed: {} ---", error);
                 update_status(
                     &app,
                     &runtime_state,
@@ -634,6 +870,20 @@ async fn run_sync_runtime(
                         connected: false,
                         phase: "reconnecting".to_string(),
                         message: Some(format!("failed to connect native sync websocket: {error}")),
+                        transport_owner: "tauri-rust".to_string(),
+                    },
+                );
+            }
+            Err(_) => {
+                println!("--- WebSocket connection TIMED OUT while connecting to {} ---", config.ws_url);
+                update_status(
+                    &app,
+                    &runtime_state,
+                    generation,
+                    SyncConnectionStatus {
+                        connected: false,
+                        phase: "reconnecting".to_string(),
+                        message: Some("Connection timed out".to_string()),
                         transport_owner: "tauri-rust".to_string(),
                     },
                 );
@@ -728,7 +978,7 @@ pub async fn get_sync_connection_status(
 #[tauri::command]
 pub async fn queue_sync_action(
     app: AppHandle,
-    runtime: State<'_, NativeSyncRuntimeState>,
+    _runtime: State<'_, NativeSyncRuntimeState>,
     action: QueueSyncActionRequest,
 ) -> Result<Vec<Ticket>, String> {
     append_pending_action(
@@ -741,21 +991,29 @@ pub async fn queue_sync_action(
         action.notes,
     )
     .await?;
-
-    if let Ok(guard) = runtime.inner.lock() {
-        if let Some(controller) = &guard.controller {
-            let _ = controller.command_tx.send(SyncRuntimeCommand::Flush);
-        }
+    if let Err(e) = trigger_flush(&app) {
+        eprintln!("Failed to trigger sync flush: {}", e);
     }
 
     load_tickets_state(app).await
 }
 
+pub fn trigger_flush(app: &AppHandle) -> Result<(), String> {
+    let runtime = app.try_state::<NativeSyncRuntimeState>().ok_or("Sync runtime not found")?;
+    if let Ok(guard) = runtime.inner.lock() {
+        if let Some(controller) = &guard.controller {
+            let _ = controller.command_tx.send(SyncRuntimeCommand::Flush);
+            return Ok(());
+        }
+    }
+    Err("Sync controller not ready".to_string())
+}
+
 #[tauri::command]
 pub async fn sync_refresh_now(
     app: AppHandle,
-    runtime: State<'_, NativeSyncRuntimeState>,
 ) -> Result<Vec<Ticket>, String> {
+    let runtime = app.try_state::<NativeSyncRuntimeState>().ok_or("Sync runtime not found")?;
     if let Ok(guard) = runtime.inner.lock() {
         if let Some(controller) = &guard.controller {
             let _ = controller.command_tx.send(SyncRuntimeCommand::Refresh);

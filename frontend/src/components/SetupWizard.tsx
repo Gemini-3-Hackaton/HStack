@@ -309,17 +309,17 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
             {selectedMode && isRemoteMode ? (
               <WizardOptionCard topBorderColor={topBorderColor} grainTheme={CARD_GRAIN_THEME} animatedPalette={sharedAnimation}>
                 <form className="flex h-full flex-col gap-4 px-3.5 py-3.5" onSubmit={handleAuthenticate}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="min-w-0">
                       <p className="text-[9px] font-bold uppercase tracking-[0.22em] text-white/30">
                         {selectedMode === 'CloudOfficial' ? t('managedCloud') : t('customServer')}
                       </p>
                       {selectedBaseUrl ? (
-                        <p className="mt-1 text-[12px] text-white/46">{selectedBaseUrl}</p>
+                        <p className="mt-1 overflow-hidden text-ellipsis whitespace-nowrap text-[12px] text-white/46">{selectedBaseUrl}</p>
                       ) : null}
                     </div>
 
-                    <div className="flex rounded-[999px] border border-white/8 bg-black/15 p-1">
+                    <div className="flex self-start rounded-[999px] border border-white/8 bg-black/15 p-1">
                       {(['login', 'register'] as const).map((mode) => {
                         const isActive = authMode === mode;
                         return (

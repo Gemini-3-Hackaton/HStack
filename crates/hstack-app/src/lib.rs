@@ -7,10 +7,12 @@ mod location_utils;
 mod planner_support;
 mod secure_store;
 mod sync_runtime;
+mod voice_runtime;
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
 use serde_json::Value;
+use rustls::crypto::ring::default_provider;
 use hstack_core::error::Error as CoreError;
 use hstack_core::provider::gemini::generate_gemini_content;
 use hstack_core::provider::openai_compat::generate_openai_content;
@@ -154,16 +156,16 @@ CRITICAL: TEMPORAL EXTRACTION - RRULE FORMAT (RFC 5545)
 The `rrule` field MUST be a valid RRULE string following iCalendar RFC 5545.
 
 RRULE STRUCTURE:
-- DTSTART: Start datetime (YYYYMMDDTHHMMSSZ) - ALWAYS append 'Z' and calculate the UTC time using the user's offset.
+- DTSTART: Start datetime in the user's local wall time (YYYYMMDDTHHMMSS). Do not convert it to UTC and do not append 'Z'.
 - RRULE: Recurrence rule (optional, for repeating events)
 
 COMMON PATTERNS:
-- One-time tomorrow 9am: DTSTART:20260320T090000Z
-- Every Monday 9am: DTSTART:20260324T090000Z RRULE:FREQ=WEEKLY;BYDAY=MO
-- Daily 9am: DTSTART:20260320T090000Z RRULE:FREQ=DAILY
+- One-time tomorrow 9am: DTSTART:20260320T090000
+- Every Monday 9am: DTSTART:20260324T090000 RRULE:FREQ=WEEKLY;BYDAY=MO
+- Daily 9am: DTSTART:20260320T090000 RRULE:FREQ=DAILY
 
 RULES:
-1. Calculate DTSTART in UTC based on the user's relative date and local timezone offset.
+1. Keep DTSTART in the user's local wall time exactly as requested.
 2. Any time-bearing ticket may use the `rrule` field. Use `DTSTART:...` for one-time scheduling, and add `RRULE:...` when the ticket repeats.
 3. Separate DTSTART and RRULE with a space.
 
@@ -198,14 +200,14 @@ TICKET TYPES:
  EVENT: Time-specific appointments, gatherings, meetings, and calendar-like items. Can use `rrule` for one-time or repeating scheduling.
 
 TOOL EXAMPLES:
-- create_ticket: {{\"type\": \"TASK\", \"title\": \"Walk the dog\", \"rrule\": \"DTSTART:20260320T140000Z\"}}
-- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260322T090000Z\"}}
+- create_ticket: {{\"type\": \"TASK\", \"title\": \"Walk the dog\", \"rrule\": \"DTSTART:20260320T140000\"}}
+- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260322T090000\"}}
 - edit_ticket: {{\"ticket_id\": \"uuid\", \"title\": \"Walk the dog (Jimbo)\"}}
-- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260326T100000Z\"}}
-- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Yoga\", \"rrule\": \"DTSTART:20260326T100000Z\", \"duration_minutes\": 120}}
-- create_ticket: {{\"type\": \"HABIT\", \"title\": \"Morning workout\", \"rrule\": \"DTSTART:20260320T070000Z RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\"}}
-- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Jimbo birthday party\", \"rrule\": \"DTSTART:20260327T190000Z\"}}
-- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Weekly team standup\", \"rrule\": \"DTSTART:20260324T083000Z RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR\"}}
+- edit_ticket: {{\"ticket_id\": \"uuid\", \"rrule\": \"DTSTART:20260326T100000\"}}
+- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Yoga\", \"rrule\": \"DTSTART:20260326T100000\", \"duration_minutes\": 120}}
+- create_ticket: {{\"type\": \"HABIT\", \"title\": \"Morning workout\", \"rrule\": \"DTSTART:20260320T070000 RRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR\"}}
+- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Jimbo birthday party\", \"rrule\": \"DTSTART:20260327T190000\"}}
+- create_ticket: {{\"type\": \"EVENT\", \"title\": \"Weekly team standup\", \"rrule\": \"DTSTART:20260324T083000 RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR\"}}
 - create_ticket: {{\"type\": \"EVENT\", \"title\": \"Dinner at home\", \"location\": {{\"location_type\": \"saved_location\", \"location_id\": \"loc-home\"}}}}
 
 REMEMBER:
@@ -295,7 +297,7 @@ Return exactly this JSON shape:
     \"type\": \"EVENT|TASK|HABIT|null\",
     \"title\": \"string|null\",
     \"rrule\": \"string|null\",
-    \"duration_minutes\": 0
+        \"duration_minutes\": null
   }}],
   \"proactive_opportunities\": [\"string\"],
   \"assumptions_to_apply\": [\"string\"],
@@ -319,7 +321,8 @@ Planning rules:
 10. tool_actions must use only AVAILABLE TOOLS and arguments must match the tool schema exactly.
 11. If no tool action is needed, return an empty tool_actions array.
 12. If a place matches SAVED LOCATIONS, use its location_id instead of raw text.
-13. If a place is ambiguous, do not emit a tool action for it; require a clarification question in user_reply_strategy.",
+13. If a place is ambiguous, do not emit a tool action for it; require a clarification question in user_reply_strategy.
+14. Use null for duration_minutes when there is no explicit duration. Only use a positive integer when the user actually specified or strongly implied a duration.",
         local_time,
         local_date,
         weekday,
@@ -472,18 +475,6 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         Ok(value) => value,
                         Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
                     };
-                    let task_status = match parse_optional_deserialized_arg::<TaskWorkflowStatus>(&args, "status", "task status") {
-                        Ok(value) => value,
-                        Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
-                    };
-                    let event_status = match parse_optional_deserialized_arg::<EventAttendanceStatus>(&args, "status", "event status") {
-                        Ok(value) => value,
-                        Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
-                    };
-                    let habit_status = match parse_optional_deserialized_arg::<HabitWorkflowStatus>(&args, "status", "habit status") {
-                        Ok(value) => value,
-                        Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
-                    };
                     let event_location = match resolve_event_location(&args, &settings) {
                         Ok(value) => value,
                         Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
@@ -510,7 +501,10 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                             title,
                             scheduled_time_iso,
                             rrule: rrule_out,
-                            status: habit_status,
+                            status: match parse_optional_deserialized_arg::<HabitWorkflowStatus>(&args, "status", "habit status") {
+                                Ok(value) => value,
+                                Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
+                            },
                             priority,
                             completed: Some(false),
                         },
@@ -520,7 +514,10 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                             rrule: rrule_out,
                             duration_minutes,
                             location: event_location,
-                            status: event_status,
+                            status: match parse_optional_deserialized_arg::<EventAttendanceStatus>(&args, "status", "event status") {
+                                Ok(value) => value,
+                                Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
+                            },
                             priority,
                             completed: Some(false),
                         },
@@ -529,7 +526,10 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                             scheduled_time_iso,
                             rrule: rrule_out,
                             duration_minutes,
-                            status: task_status,
+                            status: match parse_optional_deserialized_arg::<TaskWorkflowStatus>(&args, "status", "task status") {
+                                Ok(value) => value,
+                                Err(e) => return Ok(format!("⚠️ Tool failed: {}.", e)),
+                            },
                             priority,
                             completed: Some(false),
                         },
@@ -557,6 +557,7 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                                     return Ok(format!("⚠️ Tool failed: {}.", e));
                                 }
                             }
+                            let _ = sync_runtime::trigger_flush(&app);
                             Ok("Ticket created successfully.".to_string())
                         }
                         Err(e) => Ok(format!("⚠️ Tool failed: {}. The agent should analyze this error and try again with corrected parameters or a different approach. Details: {}", name, e)),
@@ -583,7 +584,10 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         None,
                         None,
                     ).await {
-                        Ok(_) => Ok("Ticket deleted.".to_string()),
+                        Ok(_) => {
+                            let _ = sync_runtime::trigger_flush(&app);
+                            Ok("Ticket deleted.".to_string())
+                        },
                         Err(e) => Ok(format!("⚠️ Tool failed: {}. Details: {}", name, e)),
                     }
                 }
@@ -597,29 +601,25 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         return Ok("⚠️ Tool failed: no tickets to delete.".to_string());
                     }
                     
-                    if let Ok(store) = app.store("pending_actions.json") {
-                        let mut actions: Vec<SyncAction> = store.get("pending")
-                            .and_then(|val| serde_json::from_value(val).ok())
-                            .unwrap_or_default();
-                            
-                        for ticket in tickets {
-                            actions.push(SyncAction {
-                                action_id: Uuid::new_v4().to_string(),
-                                r#type: SyncActionType::Delete,
-                                entity_id: ticket.id,
-                                entity_type: format!("{:?}", ticket.r#type).to_uppercase(),
-                                status: None,
-                                payload: None,
-                                notes: None,
-                                timestamp: chrono::Utc::now().to_rfc3339(),
-                            });
+                    let mut count = 0;
+                    for ticket in tickets {
+                         let actual_entity_type = format!("{:?}", ticket.r#type).to_uppercase();
+                         if let Err(e) = append_pending_action(
+                            &app,
+                            SyncActionType::Delete,
+                            ticket.id,
+                            actual_entity_type,
+                            None,
+                            None,
+                            None,
+                        ).await {
+                             return Ok(format!("⚠️ Tool failed while queueing deletion: {}", e));
                         }
-                        
-                        store.set("pending", serde_json::json!(actions));
-                        let _ = store.save();
+                        count += 1;
                     }
                     
-                    Ok("All tickets deleted.".to_string())
+                    let _ = sync_runtime::trigger_flush(&app);
+                    Ok(format!("Successfully deleted all {} tickets.", count))
                 }
                 "edit_ticket" => {
                     let ticket_id = args.get("ticket_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -937,21 +937,22 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
                         Err(e) => Ok(format!("⚠️ Tool failed: {}. The agent should analyze this error and try again with corrected parameters or a different approach. Details: {}", name, e)),
                     }
                 }
-                _ => Ok(format!("⚠️ Tool failed: unknown tool '{}'. The agent should use only valid tool names from the available tool list.", name)),
+                _ => Ok(format!("⚠️ Tool unknown: {}.", name)),
             }
         })
     });
 
     // Create context refresh callback
-    let app_clone2 = app.clone();
+    let app_for_refresh = app.clone();
     let context_refresh: ContextRefreshFn = Box::new(move || {
-        let app = app_clone2.clone();
+        let app = app_for_refresh.clone();
         Box::pin(async move {
-            build_system_prompt_with_fresh_context(app).await
-                .map_err(|e| hstack_core::error::Error::Internal(e))
+            let tickets = load_tickets_state(app).await.unwrap_or_default();
+            Ok(serde_json::to_string_pretty(&tickets).unwrap_or_else(|_| "[]".to_string()))
         })
     });
 
+    let _planner_app = app.clone();
     if let Some(plan) = plan_actions(app.clone(), &config, &history, &message, &tools).await? {
         if !plan.tool_actions.is_empty() {
             println!("--- EXECUTING VALIDATED PLANNER ACTIONS ---");
@@ -1048,10 +1049,22 @@ async fn chat_local(app: AppHandle, message: String, history: Vec<Message>) -> R
     }
 }
 
+fn install_rustls_crypto_provider() -> Result<(), String> {
+    default_provider()
+        .install_default()
+        .map(|_| ())
+        .map_err(|error| format!("failed to install rustls crypto provider: {error:?}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Err(error) = install_rustls_crypto_provider() {
+        panic!("{error}");
+    }
+
     let app = match tauri::Builder::default()
         .manage(NativeSyncRuntimeState::default())
+        .manage(voice_runtime::VoiceRuntimeState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
@@ -1059,6 +1072,10 @@ pub fn run() {
             app_state::save_settings,
             app_state::upsert_provider,
             app_state::delete_provider,
+            app_state::warm_secure_store,
+            app_state::get_voice_secret_status,
+            app_state::save_voice_direct_api_key,
+            app_state::clear_voice_direct_api_key,
             chat_local,
             app_state::get_tickets,
             app_state::apply_sync_update,
@@ -1071,7 +1088,10 @@ pub fn run() {
             sync_runtime::stop_native_sync,
             sync_runtime::get_sync_connection_status,
             sync_runtime::queue_sync_action,
-            sync_runtime::sync_refresh_now
+            sync_runtime::sync_refresh_now,
+            voice_runtime::start_voice_transcription,
+            voice_runtime::append_voice_audio_chunk,
+            voice_runtime::stop_voice_transcription
         ])
         .build(tauri::generate_context!()) {
             Ok(app) => app,
@@ -1260,6 +1280,27 @@ mod tests {
 
         let error = expect_plan_validation_error(plan);
         assert!(error.contains("action_required=true"));
+    }
+
+    #[test]
+    fn accepts_zero_duration_commitment_when_create_ticket_omits_duration() {
+        let mut plan = sample_plan();
+        plan.new_commitments_detected[0] = PlannerCommitment {
+            r#type: Some("TASK".to_string()),
+            title: Some("Walk the cat".to_string()),
+            rrule: None,
+            duration_minutes: Some(0),
+        };
+        plan.tool_actions = vec![PlannerAction {
+            tool: "create_ticket".to_string(),
+            arguments: json!({
+                "type": "TASK",
+                "title": "Walk the cat"
+            }),
+        }];
+        plan.dependent_tickets_impacted.clear();
+
+        assert_plan_is_valid(plan);
     }
 
     #[test]

@@ -38,4 +38,5 @@ rrule = "0.14.0"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = { version = "0.24.0", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+rustls = { version = "0.23", features = ["ring"] }
 
